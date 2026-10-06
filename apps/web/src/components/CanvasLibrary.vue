@@ -1,0 +1,29 @@
+<script setup lang="ts">
+import { computed, onMounted, ref } from 'vue';
+import { X } from '@lucide/vue';
+import type { ProductAsset, ProductImageResult, EditorShapeLayer } from '@photo-studio/shared';
+import { request } from '../api';
+defineProps<{ results: ProductImageResult[] }>();
+const emit = defineEmits<{ close: []; template: [value: 'clean' | 'banner' | 'features' | 'specification']; shape: [value: EditorShapeLayer['shape']]; asset: [value: ProductAsset]; result: [value: string] }>();
+const tab = ref('templates'); const query = ref(''); const category = ref('全部'); const assets = ref<ProductAsset[]>([]); const error = ref(''); const loading = ref(false);
+const templates = [ { id: 'clean' as const, name: '清爽商品主图', category: '商品主图', color: '#eef3f9', title: '商品名称' }, { id: 'banner' as const, name: '重点文案主图', category: '商品主图', color: '#f9ede1', title: '展示商品亮点' }, { id: 'features' as const, name: '卖点说明卡片', category: '商品套图', color: '#eaf4ef', title: '商品卖点' }, { id: 'specification' as const, name: '规格信息卡片', category: '详情页', color: '#f1edf8', title: '规格信息' } ];
+const visibleTemplates = computed(() => templates.filter(item => (category.value === '全部' || category.value === item.category) && item.name.includes(query.value.trim())));
+const shapes = { rectangle: '矩形', triangle: '三角形', ellipse: '圆形', line: '线条', arrow: '箭头', star: '星形' };
+function load() { loading.value = true; error.value = ''; request<ProductAsset[]>('/assets').then(value => { assets.value = value; }).catch((reason: Error) => { error.value = reason.message; }).finally(() => { loading.value = false; }); }
+onMounted(load);
+</script>
+<template>
+  <section class="canvas-library" aria-label="创作素材库" @pointerdown.stop @wheel.stop>
+    <header><div role="tablist" aria-label="素材类型"><button v-for="item in [{ id: 'templates', name: '模板' }, { id: 'materials', name: '素材' }, { id: 'images', name: '图片' }]" :key="item.id" type="button" role="tab" :aria-selected="tab === item.id" @click="tab = item.id; query = ''">{{ item.name }}</button></div><button type="button" aria-label="关闭创作素材库" @click="emit('close')"><X :size="16" /></button></header>
+    <input v-model="query" type="search" placeholder="搜索素材" aria-label="搜索创作素材" />
+    <template v-if="tab === 'templates'"><nav aria-label="模板分类"><button v-for="name in ['全部', '商品主图', '商品套图', '详情页']" :key="name" type="button" :aria-pressed="category === name" @click="category = name">{{ name }}</button></nav><p>应用到当前作品，可撤销；请将文案改为真实商品信息。</p><div class="library-grid"><button v-for="item in visibleTemplates" :key="item.id" type="button" :aria-label="`应用${item.name}`" @click="emit('template', item.id)"><div class="template-preview" :style="{ background: item.color }"><strong>{{ item.title }}</strong><i /><span>图片 · 商品文案</span></div><span>{{ item.name }}</span></button></div><p v-if="!visibleTemplates.length">没有匹配的版式。</p></template>
+    <template v-else-if="tab === 'materials'"><p>选择基础素材后，在作品上拖动绘制。</p><div class="library-grid"><button v-for="(name, shape) in shapes" v-show="name.includes(query.trim())" :key="shape" type="button" @click="emit('shape', shape)"><span class="shape-preview">{{ { rectangle: '▭', triangle: '△', ellipse: '○', line: '／', arrow: '↗', star: '☆' }[shape] }}</span><span>{{ name }}</span></button></div></template>
+    <template v-else><p v-if="loading">正在读取图片…</p><p v-if="error" role="alert">{{ error }}<button type="button" @click="load">重新读取</button></p><h4>会话作品</h4><div class="library-grid"><button v-for="item in results.filter(item => item.name.includes(query.trim()))" :key="item.id" type="button" :aria-label="`添加作品 ${item.name}`" @click="emit('result', item.id)"><img :src="`/api/product-image/results/${item.id}/file`" :alt="item.name" /><span>{{ item.name }}</span></button></div><h4>我的图片</h4><div class="library-grid"><button v-for="item in assets.filter(item => item.name.includes(query.trim()))" :key="item.id" type="button" :aria-label="`添加素材 ${item.name}`" @click="emit('asset', item)"><img :src="`/api/assets/${item.id}/file`" :alt="item.name" /><span>{{ item.name }}</span></button></div><p v-if="!assets.length && !loading">可以使用底部导入按钮上传图片。</p></template>
+  </section>
+</template>
+<style scoped lang="scss">
+.canvas-library { position: absolute; inset: 12px auto 12px 12px; width: min(580px, calc(100% - 24px)); z-index: 8; overflow: auto; padding: 14px; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; box-shadow: var(--shadow); cursor: default; header, nav { display: flex; gap: 8px; align-items: center; } header { justify-content: space-between; margin-bottom: 12px; } [role='tablist'] { display: flex; gap: 8px; } button { border: 0; border-radius: 5px; padding: 6px 8px; font: inherit; font-size: 12px; background: transparent; } button[aria-selected='true'], button[aria-pressed='true'] { background: var(--page); font-weight: 600; } input { width: 100%; padding: 9px; border: 1px solid var(--border); border-radius: 7px; background: var(--page); font: inherit; margin-bottom: 10px; } p { color: var(--muted); font-size: 11px; line-height: 1.7; margin: 10px 0; } h4 { font-size: 12px; margin: 12px 0; } }
+.library-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; button { display: grid; gap: 6px; min-width: 0; padding: 0; text-align: left; } img { width: 100%; height: 110px; object-fit: contain; background: var(--page); border-radius: 6px; } span { font-size: 11px; overflow-wrap: anywhere; } }
+.template-preview { height: 175px; border-radius: 6px; padding: 14px 10px; display: flex; flex-direction: column; justify-content: space-between; strong { font-size: 15px; } i { align-self: center; width: 65%; height: 70px; border-radius: 8px; background: rgb(255 255 255 / 65%); border: 1px solid rgb(0 0 0 / 8%); } span { color: var(--muted); } }
+.shape-preview { display: grid; place-items: center; height: 80px; background: var(--page); font-size: 38px !important; border-radius: 6px; }
+</style>

@@ -1,0 +1,10 @@
+{
+  "name": "@photo-studio/editor",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "scripts": { "typecheck": "tsc --noEmit" },
+  "dependencies": { "@photo-studio/shared": "0.1.0", "konva": "^10.3.0" }
+}

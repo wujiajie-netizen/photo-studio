@@ -1,0 +1,29 @@
+{
+  "name": "photo-studio",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "engines": {
+    "node": ">=24.15.0 <25"
+  },
+  "scripts": {
+    "dev": "npm run build -w @photo-studio/shared && npm run build -w @photo-studio/tools && npm run build -w @photo-studio/ai-provider && npm run build -w @photo-studio/agent && node scripts/dev.mjs",
+    "build": "npm run build -w @photo-studio/shared && npm run build -w @photo-studio/tools && npm run build -w @photo-studio/ai-provider && npm run build -w @photo-studio/agent && npm run build -w @photo-studio/server && npm run build -w @photo-studio/web",
+    "typecheck": "npm run build -w @photo-studio/shared && npm run build -w @photo-studio/tools && npm run build -w @photo-studio/ai-provider && npm run build -w @photo-studio/agent && npm run typecheck --workspaces --if-present",
+    "lint": "eslint .",
+    "test": "npm run build -w @photo-studio/shared && npm run build -w @photo-studio/tools && npm run build -w @photo-studio/ai-provider && npm run build -w @photo-studio/agent && npm run build -w @photo-studio/server && npm run test -w @photo-studio/tools && npm run test -w @photo-studio/ai-provider && npm run test -w @photo-studio/server"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.0",
+    "@types/node": "^24.10.0",
+    "eslint": "^10.12.0",
+    "eslint-plugin-vue": "^10.11.1",
+    "globals": "^16.5.0",
+    "typescript": "~5.9.3",
+    "typescript-eslint": "^8.71.0",
+    "vue-eslint-parser": "^10.2.0"
+  }
+}

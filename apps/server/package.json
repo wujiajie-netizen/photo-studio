@@ -1,0 +1,28 @@
+{
+  "name": "@photo-studio/server",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "start": "node dist/main.js",
+    "test": "node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "@nestjs/common": "^11.1.0",
+    "@nestjs/core": "^11.1.0",
+    "@nestjs/platform-express": "^11.1.0",
+    "@photo-studio/agent": "0.1.0",
+    "@photo-studio/ai-provider": "0.1.0",
+    "@photo-studio/shared": "0.1.0",
+    "@photo-studio/tools": "0.1.0",
+    "fflate": "^0.8.3",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.2",
+    "sharp": "^0.35.5"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/multer": "^2.0.0"
+  }
+}

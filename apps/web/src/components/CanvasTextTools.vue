@@ -1,13 +1,14 @@
 <script setup lang="ts">
 import { Bold, Italic, Underline, Strikethrough, SlidersHorizontal } from '@lucide/vue';
 import { useEditorStore } from '../stores/editor';
+import { EDITOR_FONT_FAMILIES } from '@photo-studio/shared';
 const editor = useEditorStore();
 defineProps<{ hideEdit?: boolean }>();
 defineEmits<{ edit: [] }>();
 function style(value: 'bold' | 'italic') {
   const layer = editor.layer; if (layer?.type !== 'text' || layer.locked) return;
   const bold = layer.fontStyle?.includes('bold') ?? false; const italic = layer.fontStyle?.includes('italic') ?? false;
-  layer.fontStyle = (value === 'bold' ? !bold : bold) ? (value === 'italic' ? !italic : italic) ? 'bold italic' : 'bold' : (value === 'italic' ? !italic : italic) ? 'italic' : 'normal'; editor.commit();
+  layer.fontStyle = (value === 'bold' ? !bold : bold) ? (value === 'italic' ? !italic : italic) ? 'bold italic' : 'bold' : (value === 'italic' ? !italic : italic) ? 'italic' : 'normal'; editor.fitText(); editor.commit();
 }
 function decoration(value: 'underline' | 'line-through') {
   const layer = editor.layer; if (layer?.type !== 'text' || layer.locked) return;
@@ -16,8 +17,8 @@ function decoration(value: 'underline' | 'line-through') {
 </script>
 <template>
   <fieldset v-if="editor.layer?.type === 'text'" class="text-tools" :disabled="editor.layer.locked" @pointerdown.stop>
-    <select v-model="editor.layer.fontFamily" aria-label="文字字体" @change="editor.commit"><option>Microsoft YaHei</option><option>Arial</option><option>Georgia</option></select>
-    <input v-model.number="editor.layer.fontSize" type="number" min="8" max="300" aria-label="文字字号" @change="editor.commit" />
+    <select v-model="editor.layer.fontFamily" aria-label="文字字体" @change="editor.fitText(); editor.commit()"><option v-for="font in EDITOR_FONT_FAMILIES" :key="font">{{ font }}</option></select>
+    <input v-model.number="editor.layer.fontSize" type="number" min="8" max="300" aria-label="文字字号" @change="editor.fitText(); editor.commit()" />
     <input v-model="editor.layer.fill" type="color" aria-label="文字颜色" @change="editor.commit" />
     <button type="button" aria-label="加粗" :aria-pressed="editor.layer.fontStyle?.includes('bold') ?? false" @click="style('bold')"><Bold :size="16" /></button>
     <button type="button" aria-label="斜体" :aria-pressed="editor.layer.fontStyle?.includes('italic') ?? false" @click="style('italic')"><Italic :size="16" /></button>

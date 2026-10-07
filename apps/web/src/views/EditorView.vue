@@ -9,11 +9,13 @@ import { useEditorStore } from '../stores/editor';
 import SaveResultDialog from '../components/SaveResultDialog.vue';
 import CanvasTextTools from '../components/CanvasTextTools.vue';
 import CanvasImageAdjustments from '../components/CanvasImageAdjustments.vue';
+import CanvasExport from '../components/CanvasExport.vue';
 
 const store = useEditorStore(); const route = useRoute();
 const canvasElement = ref<HTMLDivElement | null>(null); const canvasArea = ref<HTMLDivElement | null>(null);
 const results = ref<ProductImageResult[]>([]); const imageId = ref('');
 const exporting = ref(false); const savingProject = ref<ProductImageResult | null>(null); const renderError = ref('');
+const exportOptions = ref(false);
 let canvas: ProductCanvas | null = null; let observer: ResizeObserver | null = null;
 let painting: Promise<void> = Promise.resolve(); let mounted = false; let loadVersion = 0;
 const saveStatus = computed(() => store.saving ? '正在保存…' : store.error ? '保存失败，修改保留在页面' : store.dirty ? '等待自动保存…' : '所有修改已保存');
@@ -65,11 +67,11 @@ function align(position: 'left' | 'center' | 'right' | 'top' | 'middle' | 'botto
   if (position === 'top') layer.y = 0; if (position === 'middle') layer.y = (content.height - layer.height) / 2; if (position === 'bottom') layer.y = content.height - layer.height;
   store.commit();
 }
-function download() {
+function download(format: 'png' | 'jpeg', scale: number, name: string) {
   if (!canvas || exporting.value) return;
-  exporting.value = true; renderError.value = '';
-  painting.then(() => canvas!.export()).then((blob) => {
-    const url = URL.createObjectURL(blob); const link = document.createElement('a'); link.href = url; link.download = `${store.content?.name.replace(/\.png$/i, '') ?? '作品'}_编辑.png`; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+  exporting.value = true;
+  painting.then(() => { if (renderError.value) throw new Error(renderError.value); return canvas!.export(format, scale); }).then((blob) => {
+    const url = URL.createObjectURL(blob); const link = document.createElement('a'); link.href = url; link.download = `${name}.${format === 'jpeg' ? 'jpg' : 'png'}`; link.click(); exportOptions.value = false; setTimeout(() => URL.revokeObjectURL(url), 1000);
   }).catch((failure: Error) => { renderError.value = failure.message; }).finally(() => { exporting.value = false; });
 }
 function saveProject() {
@@ -78,6 +80,7 @@ function saveProject() {
     .catch((failure: Error) => { store.error = failure.message; });
 }
 function keyboard(event: KeyboardEvent) {
+  if (exportOptions.value) { if (event.key === 'Escape' && !exporting.value) exportOptions.value = false; return; }
   const target = event.target as HTMLElement; if (['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName)) return;
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') { event.preventDefault(); if (event.shiftKey) store.redo(); else store.undo(); }
   else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') { event.preventDefault(); store.save().catch(() => {}); }
@@ -100,7 +103,8 @@ onBeforeUnmount(() => { ++loadVersion; mounted = false; observer?.disconnect(); 
 
 <template>
   <div class="editor-page">
-    <header class="editor-heading"><RouterLink :to="store.document?.projectId ? `/projects/${store.document.projectId}` : '/product-image'" class="back"><ArrowLeft :size="16" /> 返回</RouterLink><h1>{{ store.content?.name ?? '图片编辑器' }}</h1><span role="status">{{ store.loading ? '正在读取作品…' : saveStatus }}</span><button type="button" class="button secondary" :disabled="!store.document || store.saving" @click="store.save().catch(() => {})"><Save :size="15" /> 保存</button><button type="button" class="button" :disabled="!store.document || exporting || !!renderError" @click="download"><Download :size="15" /> 导出 PNG</button></header>
+    <header class="editor-heading"><RouterLink :to="store.document?.projectId ? `/projects/${store.document.projectId}` : '/product-image'" class="back"><ArrowLeft :size="16" /> 返回</RouterLink><h1>{{ store.content?.name ?? '图片编辑器' }}</h1><span role="status">{{ store.loading ? '正在读取作品…' : saveStatus }}</span><button type="button" class="button secondary" :disabled="!store.document || store.saving" @click="store.save().catch(() => {})"><Save :size="15" /> 保存</button><button type="button" class="button" :disabled="!store.document || exporting || !!renderError" @click="exportOptions = true"><Download :size="15" /> 下载作品</button></header>
+    <CanvasExport v-if="exportOptions && store.content" :width="store.content.width" :height="store.content.height" :name="store.content.name" :busy="exporting" @close="exportOptions = false" @download="download" />
     <p v-if="store.error || renderError" class="error" role="alert">{{ store.error || renderError }} <button type="button" @click="load">重新读取作品</button></p>
     <div class="editor-layout">
       <aside class="layers-panel" aria-label="图层面板">
@@ -112,16 +116,17 @@ onBeforeUnmount(() => { ++loadVersion; mounted = false; observer?.disconnect(); 
       </aside>
       <section ref="canvasArea" class="canvas-area" aria-label="图片画布"><div ref="canvasElement" class="canvas" /></section>
       <aside class="properties-panel" aria-label="属性面板">
-        <template v-if="store.content"><h2>画布</h2><label class="field">作品名称<input v-model="store.content.name" maxlength="200" @input="store.commit" /></label><div class="paired"><label class="field">宽<input v-model.number="store.content.width" type="number" min="1" max="16384" @change="store.commit" /></label><label class="field">高<input v-model.number="store.content.height" type="number" min="1" max="16384" @change="store.commit" /></label></div><label class="field">背景<input v-model="store.content.background" type="color" @change="store.commit" /></label><button type="button" class="button secondary" @click="saveProject">保存到项目</button></template>
+        <template v-if="store.content"><h2>画布</h2><label class="field">作品名称<input v-model="store.content.name" maxlength="200" @input="store.commit" /></label><div class="paired"><label class="field">宽<input v-model.number="store.content.width" type="number" min="1" max="16384" @change="store.commit" /></label><label class="field">高<input v-model.number="store.content.height" type="number" min="1" max="16384" @change="store.commit" /></label></div><label class="field">背景<select v-if="store.content.background === 'transparent'" aria-label="背景" @change="store.content.background = '#ffffff'; store.commit()"><option>透明背景</option><option>使用颜色</option></select><template v-else><input v-model="store.content.background" type="color" @change="store.commit" /><button type="button" @click="store.content.background = 'transparent'; store.commit()">透明背景</button></template></label><button type="button" class="button secondary" @click="saveProject">保存到项目</button></template>
         <fieldset v-if="store.layer" :disabled="store.layer.locked">
           <legend>当前图层</legend><label class="field">图层名称<input v-model="store.layer.name" maxlength="200" @input="store.commit" /></label>
           <CanvasTextTools v-if="store.layer.type === 'text'" hide-edit />
           <CanvasImageAdjustments />
           <div v-if="store.layer.type === 'shape' || store.layer.type === 'path'" class="paired"><label class="field">线条颜色<input v-model="store.layer.stroke" type="color" @change="store.commit" /></label><label class="field">线条粗细<input v-model.number="store.layer.strokeWidth" type="number" :min="store.layer.type === 'path' ? 1 : 0" max="300" @change="store.commit" /></label></div>
+          <label v-if="store.layer.type === 'shape'" class="field">填充<select v-if="store.layer.fill === 'transparent'" @change="store.layer.fill = '#3b82f6'; store.commit()"><option>无填充</option><option>使用颜色</option></select><template v-else><input v-model="store.layer.fill" type="color" @change="store.commit" /><button type="button" @click="store.layer.fill = 'transparent'; store.commit()">无填充</button></template></label>
           <div class="paired"><label class="field">X<input v-model.number="store.layer.x" type="number" @change="store.commit" /></label><label class="field">Y<input v-model.number="store.layer.y" type="number" @change="store.commit" /></label></div>
           <div class="paired"><label class="field">宽度<input v-model.number="store.layer.width" type="number" min="1" max="16384" @change="store.commit" /></label><label class="field">高度<input v-model.number="store.layer.height" type="number" min="1" max="16384" @change="store.commit" /></label></div>
           <div class="paired"><label class="field">旋转<input v-model.number="store.layer.rotation" type="number" min="-360" max="360" @change="store.commit" /></label><label class="field">透明度<input v-model.number="store.layer.opacity" type="number" min="0" max="1" step="0.1" @change="store.commit" /></label></div>
-          <div v-if="store.layer.type === 'text'"><label class="field">文字内容<textarea v-model="store.layer.text" rows="4" maxlength="2000" @input="store.commit" /></label><label class="field">字体<select v-model="store.layer.fontFamily" @change="store.commit"><option>Microsoft YaHei</option><option>Arial</option><option>Georgia</option></select></label><label class="field">字号<input v-model.number="store.layer.fontSize" type="number" min="8" max="300" @change="store.commit" /></label><label class="field">文字颜色<input v-model="store.layer.fill" type="color" @change="store.commit" /></label><label class="field">文字对齐<select v-model="store.layer.align" @change="store.commit"><option value="left">左对齐</option><option value="center">居中</option><option value="right">右对齐</option></select></label></div>
+          <div v-if="store.layer.type === 'text'"><label class="field">文字内容<textarea v-model="store.layer.text" rows="4" maxlength="2000" @input="store.fitText(); store.commit()" /></label><div class="paired"><label class="field">字间距<input :value="store.layer.letterSpacing ?? 0" type="number" min="-20" max="100" step=".5" @input="store.layer.letterSpacing = Number(($event.target as HTMLInputElement).value); store.fitText(); store.commit()" /></label><label class="field">行高<input :value="store.layer.lineHeight ?? 1" type="number" min=".5" max="5" step=".1" @input="store.layer.lineHeight = Number(($event.target as HTMLInputElement).value); store.fitText(); store.commit()" /></label></div></div>
           <div class="align-actions"><button type="button" @click="align('left')">左对齐</button><button type="button" @click="align('center')">水平居中</button><button type="button" @click="align('right')">右对齐</button><button type="button" @click="align('top')">顶对齐</button><button type="button" @click="align('middle')">垂直居中</button><button type="button" @click="align('bottom')">底对齐</button></div>
         </fieldset>
         <p v-else class="help">选中图层后可调整位置、大小与文字属性。</p>

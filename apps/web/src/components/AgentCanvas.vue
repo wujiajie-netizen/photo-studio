@@ -14,6 +14,7 @@ import CanvasTextTools from './CanvasTextTools.vue';
 import CanvasBoardPreview from './CanvasBoardPreview.vue';
 import CanvasShapeDraw from './CanvasShapeDraw.vue';
 import CanvasLibrary from './CanvasLibrary.vue';
+import CanvasExport from './CanvasExport.vue';
 
 const props = defineProps<{ sessionId: string; taskIds: string[] }>();
 const emit = defineEmits<{ update: [state: { executions: AgentExecution[]; results: ProductImageResult[]; selectedId: string; loading: boolean }]; reference: [asset: ProductAsset, modifying: boolean] }>();
@@ -42,6 +43,7 @@ const drawing = ref(false); const shapeMenu = ref(false); const brushColor = ref
 const placingText = ref(false); const editingText = ref(false); const toolHistory = ref(false);
 const drawingShape = ref<EditorShapeLayer['shape'] | null>(null);
 const libraryOpen = ref(false);
+const exportOptions = ref(false);
 const shownTools = computed(() => toolHistory.value ? toolTasks.value : [activeTool.value ?? toolTasks.value[0]].filter((task): task is ImageToolTask => !!task));
 const shapeNames = { rectangle: '矩形', ellipse: '圆形', triangle: '三角形', star: '星形', line: '线条', arrow: '箭头' };
 const selectedIndex = computed(() => results.value.findIndex(result => result.id === selectedId.value));
@@ -49,6 +51,12 @@ const saveStatus = computed(() => editor.loading ? '正在读取编辑内容…'
 let painting: Promise<void> = Promise.resolve();
 let start: { x: number; y: number; offsetX: number; offsetY: number } | null = null;
 const area = ref<HTMLDivElement | null>(null); const container = ref<HTMLDivElement | null>(null);
+const areaSize = ref({ width: 0, height: 0 });
+const actionPosition = computed(() => {
+  const x = offset.value.x + (board.value?.x ?? 0) * zoom.value; const y = offset.value.y + (board.value?.y ?? 0) * zoom.value;
+  const width = Math.min(580, Math.max(0, areaSize.value.width - 24)); const center = x + (editor.content?.width ?? selected.value?.width ?? 0) * zoom.value / 2;
+  return { left: `${Math.max(width / 2 + 12, Math.min(areaSize.value.width - width / 2 - 12, center)) - x}px`, top: `${Math.max(8, Math.min(areaSize.value.height - 80, y - 65)) - y}px`, bottom: 'auto', maxWidth: `${width}px` };
+});
 let canvas: ProductCanvas | null = null; let observer: ResizeObserver | null = null; let version = 0; let resultVersion = 0;
 const streams = new Map<string, EventSource>();
 const labels = { queued: '等待生成', running: '生成和检查中', succeeded: '作品已保存', failed: '生成需要处理', cancelled: '生成已停止' };
@@ -59,7 +67,7 @@ function paint() {
   const scale = specialMode.value ? Math.min((area.value.clientWidth - 80) / (toolSettings.value === 'expand' ? expandBox.value.width : content.width), (area.value.clientHeight - (maskMode.value ? 260 : 170)) / (toolSettings.value === 'expand' ? expandBox.value.height : content.height), 1) : zoom.value;
   canvasScale.value = Math.max(.03, scale); boardSizes.value[result.id] = { width: content.width, height: content.height }; renderError = '';
   painting = canvas.render(content, area.value.clientWidth, area.value.clientHeight, Math.max(.03, scale), !hand.value && !cropping.value && !drawing.value && !drawingShape.value && !placingText.value && !maskMode.value && !toolSettings.value)
-    .then(() => { if (editing.value && !hand.value && !cropping.value && !drawing.value && !maskMode.value && !toolSettings.value) canvas?.select(editor.selected); }).catch((reason: Error) => { renderError = reason.message; error.value = reason.message; });
+    .then(() => { if (editing.value && !hand.value && !cropping.value && !drawing.value && !drawingShape.value && !placingText.value && !maskMode.value && !toolSettings.value) canvas?.select(editor.selected); }).catch((reason: Error) => { renderError = reason.message; error.value = reason.message; });
 }
 function fit(all = false) {
   if (!area.value || !selected.value || !board.value) return;
@@ -95,11 +103,11 @@ function select(id: string, focus = true) {
 }
 function crop() {
   if (!editor.content || editor.loading) return;
-  cropping.value = true; drawing.value = false; tools.value = false; picked.value = false; panel.value = false; hand.value = false; fit();
+  cropping.value = true; drawing.value = false; drawingShape.value = null; placingText.value = false; editingText.value = false; libraryOpen.value = false; tools.value = false; picked.value = false; panel.value = false; hand.value = false; fit();
 }
 function openTool(operation: ImageToolInput['operation']) {
   if (!editor.content || toolSubmitting.value || activeTool.value) return;
-  tools.value = false; textMenu.value = false; picked.value = false; drawing.value = false; hand.value = false; panel.value = false; error.value = ''; fit();
+  tools.value = false; textMenu.value = false; picked.value = false; drawing.value = false; drawingShape.value = null; placingText.value = false; editingText.value = false; libraryOpen.value = false; hand.value = false; panel.value = false; error.value = ''; fit();
   if (operation === 'edit' || operation === 'erase' || operation === 'replace-text') maskMode.value = operation;
   else if (operation === 'upscale' || operation === 'expand') {
     toolSettings.value = operation;
@@ -148,12 +156,13 @@ function subscribeTool(_task: ImageToolTask | null, current: number) {
     if (update.status === 'succeeded' && previous.status !== 'succeeded') readResults(current).catch((reason: Error) => { if (current === version) error.value = reason.message; });
   });
   stream.onerror = () => { if (current === version) error.value = '图片处理状态连接中断，正在重连…'; };
+  stream.onopen = () => { if (current === version && error.value === '图片处理状态连接中断，正在重连…') error.value = ''; };
 }
-function addShape(shape: EditorShapeLayer['shape'], rect: { x: number; y: number; width: number; height: number }) {
+function addShape(shape: EditorShapeLayer['shape'], rect: { x: number; y: number; width: number; height: number; rotation: number }) {
   const content = editor.content; if (!content || content.layers.length >= 50) return;
   const id = crypto.randomUUID();
-  content.layers.push({ id, type: 'shape', name: shapeNames[shape], shape, ...rect, rotation: 0, opacity: 1, visible: true, locked: false, fill: ['line', 'arrow'].includes(shape) ? 'transparent' : '#3b82f6', stroke: '#202020', strokeWidth: ['line', 'arrow'].includes(shape) ? 8 : 0 });
-  drawingShape.value = null; shapeMenu.value = false; hand.value = false; drawing.value = false; editor.selected = id; panel.value = true; editor.commit();
+  content.layers.push({ id, type: 'shape', name: shapeNames[shape], shape, ...rect, opacity: 1, visible: true, locked: false, fill: ['line', 'arrow'].includes(shape) ? 'transparent' : '#3b82f6', stroke: '#202020', strokeWidth: ['line', 'arrow'].includes(shape) ? 8 : 0 });
+  drawingShape.value = null; shapeMenu.value = false; hand.value = false; drawing.value = false; editor.selected = id; picked.value = true; panel.value = true; editor.commit();
 }
 function draw(points: number[]) {
   const content = editor.content; if (!content || content.layers.length >= 50) return;
@@ -176,7 +185,7 @@ function uploadImage(event: Event) {
 function insertAsset(asset: ProductAsset) {
   const content = editor.content; if (!content || content.layers.length >= 50) return;
   const id = crypto.randomUUID(); const scale = Math.min(content.width * .6 / asset.width, content.height * .6 / asset.height, 1); const width = asset.width * scale; const height = asset.height * scale;
-  content.layers.push({ id, type: 'asset-image', name: asset.name, assetId: asset.id, x: (content.width - width) / 2, y: (content.height - height) / 2, width, height, rotation: 0, opacity: 1, visible: true, locked: false }); editor.selected = id; panel.value = true; libraryOpen.value = false; editor.commit();
+  content.layers.push({ id, type: 'asset-image', name: asset.name, assetId: asset.id, x: (content.width - width) / 2, y: (content.height - height) / 2, width, height, rotation: 0, opacity: 1, visible: true, locked: false }); editor.selected = id; picked.value = true; panel.value = true; libraryOpen.value = false; editor.commit();
 }
 function applyTemplate(value: 'clean' | 'banner' | 'features' | 'specification') {
   const content = editor.content; if (!content) return;
@@ -204,7 +213,7 @@ function edit(add = false) {
 function addText(point?: { x: number; y: number }) {
   if (!editor.content || editor.content.layers.length >= 50) return;
   const content = editor.content; const id = crypto.randomUUID();
-  const fontSize = Math.min(72, Math.round(content.width * .06));
+  const fontSize = Math.max(8, Math.min(72, Math.round(content.width * .06)));
   content.layers.push({ id, type: 'text', name: '新文字', x: point?.x ?? content.width * .1, y: point?.y ?? content.height * .1, width: Math.min(content.width * .6, content.width - (point?.x ?? content.width * .1)), height: fontSize * 3, rotation: 0, opacity: 1, visible: true, locked: false, text: '输入商品文案', fontSize, fontFamily: 'Microsoft YaHei', fill: '#202020', align: 'left' });
   editor.selected = id; editor.commit(); placingText.value = false; editingText.value = true; picked.value = true; panel.value = false;
 }
@@ -213,17 +222,13 @@ function placeText(event: PointerEvent) {
   addText({ x: Math.max(0, Math.min(content.width - 1, (event.clientX - bounds.left) / bounds.width * content.width)), y: Math.max(0, Math.min(content.height - 1, (event.clientY - bounds.top) / bounds.height * content.height)) });
 }
 function updateText() {
-  const layer = editor.layer; if (layer?.type !== 'text') return;
-  /* 延长文案时随换行增高文字框，保留用户设置的宽度，避免新文字被固定高度截断。 */
-  const context = document.createElement('canvas').getContext('2d')!; context.font = `${layer.fontStyle ?? 'normal'} ${layer.fontSize}px "${layer.fontFamily}"`;
-  const lines = layer.text.split('\n').reduce((count, text) => count + Math.max(1, Math.ceil((context.measureText(text).width + Math.max(0, layer.letterSpacing ?? 0) * text.length) / layer.width)), 0);
-  layer.height = Math.min(16384, Math.max(layer.height, Math.ceil((lines + 1) * layer.fontSize * (layer.lineHeight ?? 1)))); editor.commit();
+  editor.fitText(); editor.commit();
 }
 function addImage() {
   const result = results.value.find(item => item.id === imageId.value); const content = editor.content;
   if (!result || !content || content.layers.length >= 50) return;
   const id = crypto.randomUUID(); const width = content.width * .5;
-  content.layers.push({ id, type: 'image', name: result.name, resultId: result.id, x: content.width * .25, y: content.height * .25, width, height: result.height / result.width * width, rotation: 0, opacity: 1, visible: true, locked: false }); editor.selected = id; editor.commit();
+  content.layers.push({ id, type: 'image', name: result.name, resultId: result.id, x: content.width * .25, y: content.height * .25, width, height: result.height / result.width * width, rotation: 0, opacity: 1, visible: true, locked: false }); editor.selected = id; picked.value = true; editor.commit();
 }
 function removeLayer() {
   if (!editor.content || !editor.layer || editor.layer.locked) return;
@@ -234,18 +239,18 @@ function duplicate() {
   const layer = { ...editor.layer, id: crypto.randomUUID(), name: `${editor.layer.name} 副本`, x: editor.layer.x + 20, y: editor.layer.y + 20 };
   editor.content.layers.push(layer); editor.selected = layer.id; editor.commit();
 }
-function download() {
+function download(format: 'png' | 'jpeg', scale: number, name: string) {
   if (!canvas || exporting.value || !selected.value) return;
   exporting.value = true; error.value = '';
-  painting.then(() => canvas!.export()).then(blob => {
-    const url = URL.createObjectURL(blob); const link = document.createElement('a'); link.href = url; link.download = `${selected.value!.name.replace(/\.(png|jpe?g)$/i, '')}${editing.value ? '_编辑' : ''}.png`; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+  painting.then(() => { if (renderError) throw new Error(renderError); return canvas!.export(format, scale); }).then(blob => {
+    const url = URL.createObjectURL(blob); const link = document.createElement('a'); link.href = url; link.download = `${name}.${format === 'jpeg' ? 'jpg' : 'png'}`; link.click(); exportOptions.value = false; setTimeout(() => URL.revokeObjectURL(url), 1000);
   }).catch((reason: Error) => { error.value = reason.message; }).finally(() => { exporting.value = false; });
 }
 function reference(modifying = false) {
   const result = selected.value; if (!result || referencing.value) return;
   const current = version; referencing.value = true; error.value = '';
   /* 将选中结果通过已有素材接口加入下一轮；复用 sourceAssetId，不增加隐含的图片关联字段。 */
-  const image = editing.value ? painting.then(() => canvas!.export()) : fetch(`/api/product-image/results/${result.id}/file`).then(response => { if (!response.ok) throw new Error('当前作品无法读取。'); return response.blob(); });
+  const image = editing.value ? painting.then(() => { if (renderError) throw new Error(renderError); return canvas!.export(); }) : fetch(`/api/product-image/results/${result.id}/file`).then(response => { if (!response.ok) throw new Error('当前作品无法读取。'); return response.blob(); });
   image.then(blob => {
     if (current !== version) return;
     const form = new FormData(); form.append('file', blob, result.name); form.append('name', result.name);
@@ -253,13 +258,14 @@ function reference(modifying = false) {
   }).then(asset => { if (current === version && asset) emit('reference', asset, modifying); }).catch((reason: Error) => { if (current === version) error.value = reason.message; }).finally(() => { referencing.value = false; });
 }
 function keyboard(event: KeyboardEvent) {
+  if (exportOptions.value) { if (event.key === 'Escape' && !exporting.value) exportOptions.value = false; return; }
   if (event.key === 'Escape') libraryOpen.value = false;
   if (event.key === 'Escape') drawingShape.value = null;
   if (event.key === 'Escape' && !toolSubmitting.value) { placingText.value = false; editingText.value = false; toolHistory.value = false; maskMode.value = null; toolSettings.value = null; cropping.value = false; drawing.value = false; tools.value = false; textMenu.value = false; shapeMenu.value = false; picked.value = false; overview.value = false; help.value = false; panel.value = false; return; }
   const target = event.target as HTMLElement; if (['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName) || target.isContentEditable) return;
   if (cropping.value || maskMode.value || toolSettings.value || toolSubmitting.value) return;
   else if (event.key.toLowerCase() === 'v') { hand.value = false; drawing.value = false; placingText.value = false; drawingShape.value = null; }
-  else if (event.key.toLowerCase() === 't' && selected.value) { placingText.value = true; hand.value = false; drawing.value = false; }
+  else if (event.key.toLowerCase() === 't' && selected.value) { placingText.value = true; hand.value = false; drawing.value = false; drawingShape.value = null; editingText.value = false; libraryOpen.value = false; picked.value = false; }
   else if (event.code === 'Space') { event.preventDefault(); if (spaceHand === null) spaceHand = hand.value; hand.value = true; }
   else if (event.key.toLowerCase() === 'h') { hand.value = true; drawing.value = false; placingText.value = false; drawingShape.value = null; }
   else if (event.key === '0') fit();
@@ -309,7 +315,7 @@ function subscribe(execution: AgentExecution, current: number) {
     if (!['queued', 'running'].includes(update.status)) { stream.close(); streams.delete(update.id); }
   });
   stream.onerror = () => { if (current === version) error.value = '画板实时连接中断，正在重连…'; };
-  stream.onopen = () => { if (current === version) error.value = ''; };
+  stream.onopen = () => { if (current === version && error.value === '画板实时连接中断，正在重连…') error.value = ''; };
 }
 function addExecution(execution: AgentExecution) {
   const index = executions.value.findIndex(item => item.id === execution.id);
@@ -362,7 +368,7 @@ onUnmounted(() => window.removeEventListener('keyup', releaseSpace));
 watch(() => editor.selected, id => { if (editing.value) canvas?.select(id); });
 watch(() => editor.selected, id => { picked.value = !!id; });
 watch([boards, offset, zoom], scheduleScene, { deep: true });
-onMounted(() => { canvas = new ProductCanvas(container.value!, id => { if (editing.value && !hand.value && !cropping.value) { editor.selected = id; picked.value = !!id; tools.value = false; } }, (id, values) => editor.updateLayer(id, values)); observer = new ResizeObserver(paint); observer.observe(area.value!); paint(); window.addEventListener('keydown', keyboard); window.addEventListener('beforeunload', beforeUnload); });
+onMounted(() => { canvas = new ProductCanvas(container.value!, id => { if (editing.value && !hand.value && !cropping.value) { editor.selected = id; picked.value = !!id; tools.value = false; } }, (id, values) => editor.updateLayer(id, values)); observer = new ResizeObserver(() => { areaSize.value = { width: area.value!.clientWidth, height: area.value!.clientHeight }; paint(); }); observer.observe(area.value!); paint(); window.addEventListener('keydown', keyboard); window.addEventListener('beforeunload', beforeUnload); });
 onBeforeRouteLeave(() => editor.save().then(saveScene).then(() => true).catch(() => false));
 onBeforeRouteUpdate(() => editor.save().then(saveScene).then(() => true).catch(() => false));
 onUnmounted(() => { saveScene().catch(() => {}); ++version; if (sceneTimer) clearTimeout(sceneTimer); for (const stream of streams.values()) stream.close(); observer?.disconnect(); canvas?.destroy(); editor.close(); window.removeEventListener('keydown', keyboard); window.removeEventListener('beforeunload', beforeUnload); });
@@ -370,7 +376,8 @@ onUnmounted(() => { saveScene().catch(() => {}); ++version; if (sceneTimer) clea
 
 <template>
   <section class="agent-canvas" aria-label="作品画板">
-    <header><div><h2>作品画板</h2><span>{{ editing ? saveStatus : results.length ? `${results.length} 张作品 · 已自动保存到项目` : '生成作品会展示在这里' }}</span></div><button type="button" :disabled="loading || editor.dirty || editor.saving || cropping || !!maskMode || toolSubmitting || !!toolSettings" aria-label="刷新作品" title="刷新作品" @click="load"><RefreshCw :size="15" /></button><button v-if="selected" class="button" :disabled="exporting || editor.loading || cropping || !!maskMode || toolSubmitting || !!toolSettings" @click="download"><Download :size="14" /> {{ exporting ? '导出中…' : '下载 PNG' }}</button></header>
+    <header><div><h2>作品画板</h2><span>{{ editing ? saveStatus : results.length ? `${results.length} 张作品 · 已自动保存到项目` : '生成作品会展示在这里' }}</span></div><button type="button" :disabled="loading || editor.dirty || editor.saving || cropping || !!maskMode || toolSubmitting || !!toolSettings" aria-label="刷新作品" title="刷新作品" @click="load"><RefreshCw :size="15" /></button><button v-if="selected" class="button" :disabled="exporting || editor.loading || cropping || !!maskMode || toolSubmitting || !!toolSettings" @click="exportOptions = true"><Download :size="14" /> {{ exporting ? '导出中…' : '下载作品' }}</button></header>
+    <CanvasExport v-if="exportOptions && selected" :width="editor.content?.width ?? selected.width" :height="editor.content?.height ?? selected.height" :name="editor.content?.name ?? selected.name" :busy="exporting" @close="exportOptions = false" @download="download" />
     <p v-if="error" class="canvas-notice" role="alert">{{ error }}</p>
     <p v-if="sceneError" class="canvas-notice" role="alert">{{ sceneError }}<button type="button" @click="saveScene().catch(() => {})">重试保存布局</button></p>
     <div class="canvas-body">
@@ -380,7 +387,7 @@ onUnmounted(() => { saveScene().catch(() => {}); ++version; if (sceneTimer) clea
       <template v-if="!specialMode"><div v-for="item in boards.filter(item => item.resultId !== selectedId)" :key="item.resultId" class="canvas-board" :style="{ transform: `translate(${offset.x + item.x * zoom}px, ${offset.y + item.y * zoom}px)` }" @click="select(item.resultId, false)"><button type="button" class="board-title" :aria-label="`移动画板 ${results.find(result => result.id === item.resultId)?.name}`" @pointerdown="startBoard($event, item.resultId)">{{ results.find(result => result.id === item.resultId)?.name }}</button><CanvasBoardPreview :result-id="item.resultId" :zoom="zoom" @size="boardSizes[item.resultId] = $event" /></div></template>
       <div v-show="selected" class="canvas-content" :style="specialMode ? { left: '50%', top: '50%', transform: `translate(${-((toolSettings === 'expand' ? expandBox.x + expandBox.width / 2 : (editor.content?.width ?? 0) / 2) * canvasScale)}px, ${-((toolSettings === 'expand' ? expandBox.y + expandBox.height / 2 : (editor.content?.height ?? 0) / 2) * canvasScale) - (maskMode ? 80 : 45)}px)` } : { left: '0', top: '0', transform: `translate(${offset.x + (board?.x ?? 0) * zoom}px, ${offset.y + (board?.y ?? 0) * zoom}px)` }">
         <button v-if="selected && !specialMode" type="button" class="board-title" :aria-label="`移动画板 ${selected.name}`" @pointerdown="startBoard($event, selected.id)">{{ editing && editor.content ? editor.content.name : selected.name }} · {{ editing && editor.content ? editor.content.width : selected.width }} × {{ editing && editor.content ? editor.content.height : selected.height }}</button>
-        <div v-if="picked && !hand && !cropping && !drawing && !maskMode && !toolSettings" class="selected-actions" role="toolbar" aria-label="当前作品操作" @pointerdown.stop>
+        <div v-if="picked && !hand && !cropping && !drawing && !drawingShape && !placingText && !maskMode && !toolSettings" class="selected-actions" :style="actionPosition" role="toolbar" aria-label="当前作品操作" @pointerdown.stop>
           <template v-if="editor.layer?.type === 'image' || editor.layer?.type === 'asset-image'">
             <button type="button" :disabled="toolSubmitting || !!activeTool" @click="openTool('split-layers')"><Layers3 :size="14" /> 拆分图层</button>
             <div class="tool-menu"><button type="button" :aria-expanded="textMenu" :disabled="toolSubmitting || !!activeTool" @click="textMenu = !textMenu; tools = false"><Type :size="14" /> 编辑文字</button><div v-if="textMenu" role="menu"><button type="button" role="menuitem" @click="openTool('recognize-text')">直接编辑</button><button type="button" role="menuitem" @click="openTool('replace-text')">无痕改字</button><button type="button" role="menuitem" @click="textMenu = false; edit(true)">添加文字</button></div></div>
@@ -392,8 +399,8 @@ onUnmounted(() => { saveScene().catch(() => {}); ++version; if (sceneTimer) clea
           <button type="button" :aria-pressed="panel" aria-label="编辑属性" title="编辑属性" @click="panel ? panel = false : edit()"><SlidersHorizontal :size="15" /></button>
         </div>
         <div ref="container" role="img" :aria-label="selected?.name" @dblclick="editingText = editor.layer?.type === 'text'" />
-        <div v-if="placingText" class="text-placement" aria-label="点击画板添加文字" @pointerdown.stop="placeText" />
-        <CanvasShapeDraw v-if="drawingShape && editor.content" :shape="drawingShape" :width="editor.content.width" :height="editor.content.height" @draw="addShape(drawingShape!, $event)" />
+        <div v-if="placingText && !hand" class="text-placement" aria-label="点击画板添加文字" @pointerdown.stop="placeText" />
+        <CanvasShapeDraw v-if="drawingShape && editor.content && !hand" :shape="drawingShape" :width="editor.content.width" :height="editor.content.height" @draw="addShape(drawingShape!, $event)" />
         <div v-if="editingText && editor.layer?.type === 'text'" class="text-entry" @pointerdown.stop><textarea v-model="editor.layer.text" aria-label="编辑文字内容" rows="2" maxlength="2000" :disabled="editor.layer.locked" @input="updateText" /><button type="button" @click="editingText = false">完成</button></div>
         <CanvasCrop v-if="cropping && editor.content" :width="editor.content.width" :height="editor.content.height" @cancel="cropping = false; picked = true; fit()" @apply="applyCrop" />
         <CanvasDraw v-if="drawing && editor.content" :width="editor.content.width" :height="editor.content.height" :stroke="brushColor" :size="brushSize" @draw="draw" />
@@ -406,7 +413,7 @@ onUnmounted(() => { saveScene().catch(() => {}); ++version; if (sceneTimer) clea
     <aside v-if="panel && selected" class="canvas-panel" aria-label="画板图层与属性">
       <header><h3>图层与属性</h3><button type="button" aria-label="关闭图层面板" @click="panel = false"><X :size="15" /></button></header><p v-if="editor.loading">正在读取…</p>
       <template v-if="editor.content && editing">
-        <ul><li v-for="layer in [...editor.content.layers].reverse()" :key="layer.id" :class="{ selected: editor.selected === layer.id }"><button type="button" class="layer-name" @click="editor.selected = layer.id">{{ { image: '图片', 'asset-image': '素材', text: '文字', shape: '形状', path: '画笔' }[layer.type] }} · {{ layer.name }}</button><button type="button" :aria-label="`${layer.visible ? '隐藏' : '显示'} ${layer.name}`" @click="layer.visible = !layer.visible; editor.commit()"><component :is="layer.visible ? Eye : EyeOff" :size="13" /></button><button type="button" :aria-label="`${layer.locked ? '解锁' : '锁定'} ${layer.name}`" @click="layer.locked = !layer.locked; editor.commit()"><component :is="layer.locked ? Lock : Unlock" :size="13" /></button></li></ul>
+        <ul><li v-for="layer in [...editor.content.layers].reverse()" :key="layer.id" :class="{ selected: editor.selected === layer.id }"><button type="button" class="layer-name" @click="editor.selected = layer.id; picked = true">{{ { image: '图片', 'asset-image': '素材', text: '文字', shape: '形状', path: '画笔' }[layer.type] }} · {{ layer.name }}</button><button type="button" :aria-label="`${layer.visible ? '隐藏' : '显示'} ${layer.name}`" @click="layer.visible = !layer.visible; editor.commit()"><component :is="layer.visible ? Eye : EyeOff" :size="13" /></button><button type="button" :aria-label="`${layer.locked ? '解锁' : '锁定'} ${layer.name}`" @click="layer.locked = !layer.locked; editor.commit()"><component :is="layer.locked ? Lock : Unlock" :size="13" /></button></li></ul>
         <div class="layer-controls"><button type="button" :disabled="!editor.layer || editor.layer.locked || editor.content.layers.length >= 50" @click="duplicate"><Copy :size="13" /> 复制</button><button type="button" :disabled="!editor.layer || editor.layer.locked" @click="removeLayer"><Trash2 :size="13" /> 删除</button></div>
         <label class="image-picker">添加会话作品<select v-model="imageId" aria-label="添加会话作品"><option value="">选择图片</option><option v-for="result in results" :key="result.id" :value="result.id">{{ result.name }}</option></select><button type="button" :disabled="!imageId || editor.content.layers.length >= 50" @click="addImage"><Plus :size="13" /> 添加图片图层</button></label><CanvasProperties />
       </template><p v-if="editor.error" class="canvas-notice" role="alert">{{ editor.error }}<button type="button" @click="editor.save().catch(() => {})">重试保存</button></p>
@@ -416,11 +423,11 @@ onUnmounted(() => { saveScene().catch(() => {}); ++version; if (sceneTimer) clea
 <section v-if="toolSettings === 'upscale'" class="tool-settings" aria-label="AI 超清"><strong>AI 超清</strong><label>清晰度<select v-model.number="upscale" :disabled="toolSubmitting"><option :value="2">2 倍</option><option :value="4">4 倍</option></select></label><p>增强细节，处理结果作为新作品保存。</p><div><button type="button" :disabled="toolSubmitting" @click="toolSettings = null; picked = true">取消</button><button type="button" :disabled="toolSubmitting" @click="submitTool({ operation: 'upscale', scale: upscale })">{{ toolSubmitting ? '正在提交…' : '开始超清' }}</button></div></section>
     <div v-if="toolTasks.length && !maskMode && !cropping && !toolSettings" class="tool-status" :class="{ expanded: toolHistory }" aria-label="图片处理记录"><header><span>图片处理</span><button type="button" :aria-expanded="toolHistory" @click="toolHistory = !toolHistory">{{ toolHistory ? '收起记录' : `全部记录 · ${toolTasks.length}` }}</button></header><article v-for="task in shownTools" :key="task.id"><span>{{ toolNames[task.input.operation] }} · {{ { queued: '等待处理', running: '处理中', succeeded: '已完成', failed: '处理失败', cancelled: '已停止' }[task.status] }}{{ ['queued', 'running'].includes(task.status) ? ` ${task.progress}%` : '' }}</span><p v-if="task.error" role="alert">{{ task.error }}</p><button v-if="['queued', 'running'].includes(task.status)" type="button" @click="changeTool(task, 'cancel')">停止</button><button v-if="['failed', 'cancelled'].includes(task.status)" type="button" @click="changeTool(task, 'retry')">重试</button><button v-if="task.status === 'succeeded'" type="button" @click="select(task.outputResultIds[0]); toolHistory = false">查看结果</button></article></div>
     <div v-if="!cropping && !maskMode && !toolSettings && !toolSubmitting" class="canvas-toolbar" role="toolbar" aria-label="画板工具">
-      <button type="button" :class="{ selected: !hand && !drawing }" :aria-pressed="!hand && !drawing" aria-label="选择工具" title="选择工具 V" @click="hand = false; drawing = false"><MousePointer2 :size="17" /></button><button type="button" :class="{ selected: hand }" :aria-pressed="hand" aria-label="抓手平移" title="抓手 H" @click="hand = true; drawing = false"><Hand :size="17" /></button><i />
-      <button type="button" :disabled="!selected || editor.loading" :aria-pressed="placingText" aria-label="添加文字" title="添加文字 T，点击画板放置" @click="placingText = !placingText; drawing = false; hand = false; picked = false; panel = false"><Type :size="17" /></button><button type="button" :disabled="!selected || editor.loading" :aria-pressed="drawing" aria-label="画笔" title="画笔" @click="drawing = !drawing; placingText = false; hand = false; picked = false; panel = false"><Brush :size="17" /></button>
+      <button type="button" :class="{ selected: !hand && !drawing && !placingText && !drawingShape }" :aria-pressed="!hand && !drawing && !placingText && !drawingShape" aria-label="选择工具" title="选择工具 V" @click="hand = false; drawing = false; placingText = false; drawingShape = null; libraryOpen = false; shapeMenu = false"><MousePointer2 :size="17" /></button><button type="button" :class="{ selected: hand }" :aria-pressed="hand" aria-label="抓手平移" title="抓手 H" @click="hand = true; drawing = false; placingText = false; drawingShape = null; editingText = false; libraryOpen = false; shapeMenu = false"><Hand :size="17" /></button><i />
+      <button type="button" :disabled="!selected || editor.loading" :aria-pressed="placingText" aria-label="添加文字" title="添加文字 T，点击画板放置" @click="placingText = !placingText; drawingShape = null; editingText = false; libraryOpen = false; shapeMenu = false; drawing = false; hand = false; picked = false; panel = false"><Type :size="17" /></button><button type="button" :disabled="!selected || editor.loading" :aria-pressed="drawing" aria-label="画笔" title="画笔" @click="drawing = !drawing; drawingShape = null; editingText = false; libraryOpen = false; shapeMenu = false; placingText = false; hand = false; picked = false; panel = false"><Brush :size="17" /></button>
       <div class="shape-menu"><button type="button" :disabled="!selected || editor.loading" :aria-expanded="shapeMenu" aria-label="形状" title="形状，选择后拖动绘制" @click="shapeMenu = !shapeMenu"><Shapes :size="17" /></button><div v-if="shapeMenu"><button v-for="(name, shape) in shapeNames" :key="shape" type="button" @click="drawingShape = shape; shapeMenu = false; placingText = false; drawing = false; hand = false; picked = false; panel = false">{{ name }}</button></div></div>
       <button type="button" :disabled="!selected || editor.loading" :aria-expanded="libraryOpen" aria-label="创作素材库" title="模板、素材与图片" @click="libraryOpen = !libraryOpen; picked = false; placingText = false; drawingShape = null; drawing = false"><Image :size="17" /></button>
-      <label class="image-upload" :class="{ disabled: !selected || importing || editor.loading }" title="导入图片"><Upload :size="17" /><input type="file" accept="image/png,image/jpeg,image/webp" aria-label="导入图片图层" :disabled="!selected || importing || editor.loading" @change="uploadImage" /></label><button type="button" :disabled="!selected || editor.loading" aria-label="图层与属性" title="图层与属性" @click="drawing = false; edit()"><Layers3 :size="17" /></button><i />
+      <label class="image-upload" :class="{ disabled: !selected || importing || editor.loading }" title="导入图片"><Upload :size="17" /><input type="file" accept="image/png,image/jpeg,image/webp" aria-label="导入图片图层" :disabled="!selected || importing || editor.loading" @change="uploadImage" /></label><button type="button" :disabled="!selected || editor.loading" aria-label="图层与属性" title="图层与属性" @click="drawing = false; placingText = false; drawingShape = null; libraryOpen = false; edit()"><Layers3 :size="17" /></button><i />
       <button type="button" :disabled="!editing || !editor.canUndo" aria-label="撤销" title="撤销 Ctrl+Z" @click="editor.undo"><Undo2 :size="17" /></button><button type="button" :disabled="!editing || !editor.canRedo" aria-label="重做" title="重做 Ctrl+Shift+Z" @click="editor.redo"><Redo2 :size="17" /></button><button type="button" :aria-expanded="help" aria-label="操作帮助" title="操作帮助" @click="help = !help"><HelpCircle :size="16" /></button>
       <div v-if="drawing" class="brush-controls"><label>颜色<input v-model="brushColor" type="color" aria-label="画笔颜色" /></label><label>大小<input v-model.number="brushSize" type="range" min="1" max="100" aria-label="画笔大小" />{{ brushSize }}</label></div>
     </div>

@@ -29,13 +29,15 @@ test('image tools preserve unmasked pixels, persist real layer outputs, validate
       if (prompt.includes('WAIT_CANCEL')) return new Promise((_, reject) => signal.addEventListener('abort', () => reject(new Error('cancelled')), { once: true }));
       return sharp(input).metadata().then(({ width, height }) => {
         if (prompt.includes('segmentation matte')) {
-          const data = Buffer.alloc(width * height); for (let y = 15; y < 45; y++) data.fill(255, y * width + 20, y * width + 60);
+          const data = Buffer.alloc(width * height);
+          if (prompt.includes('装饰')) { for (let y = 45; y < 55; y++) data.fill(255, y * width + 3, y * width + 13); }
+          else for (let y = 15; y < 45; y++) data.fill(255, y * width + 20, y * width + 60);
           return sharp(data, { raw: { width, height, channels: 1 } }).png().toBuffer();
         }
         return sharp({ create: { width, height, channels: 4, background: '#00ff00' } }).png().toBuffer();
       });
     },
-    async *run() { yield { type: 'completed', result: { regions: [{ text: 'COFFEE', x: 8, y: 8, width: 40, height: 10, color: '#000000', align: 'left' }] } }; },
+    async *run(input) { yield { type: 'completed', result: input.schema.properties.objects ? { objects: [{ name: '主体', x: 20, y: 5, width: 40, height: 30 }, { name: '装饰', x: 3, y: 35, width: 10, height: 10 }] } : { regions: [{ text: 'COFFEE', x: 8, y: 8, width: 40, height: 10, color: '#000000', align: 'left' }] } }; },
     cancel() { return Promise.resolve(); }
   };
   class TestModule {}
@@ -79,9 +81,12 @@ test('image tools preserve unmasked pixels, persist real layer outputs, validate
   }).then(pixels => {
     assert.deepEqual([...pixels.subarray(0, 4)], [0, 0, 255, 255]); assert.deepEqual([...pixels.subarray((30 * 80 + 40) * 4, (30 * 80 + 40) * 4 + 4)], [0, 255, 0, 255]);
     return submit({ operation: 'split-layers' });
-  }).then(task => { splitTask = task; assert.equal(task.outputLayers.length, 3); assert.equal(task.outputLayers[2].type, 'text'); assert.equal(task.outputLayers[2].text, 'COFFEE'); assert.notEqual(task.outputLayers[0].resultId, task.outputLayers[1].resultId); return send('/editor/documents', { resultId: task.outputResultIds[0] }); }).then(({ body }) => {
+  }).then(task => { splitTask = task; assert.equal(task.outputLayers.length, 4); assert.equal(task.outputLayers[2].name, '装饰'); assert.equal(task.outputLayers[3].type, 'text'); assert.equal(task.outputLayers[3].text, 'COFFEE'); assert.notEqual(task.outputLayers[0].resultId, task.outputLayers[1].resultId); assert.notEqual(task.outputLayers[1].resultId, task.outputLayers[2].resultId); return send('/editor/documents', { resultId: task.outputResultIds[0] }); }).then(({ body }) => {
     document = body; assert.deepEqual(body.layers, splitTask.outputLayers); return fetch(`${base}/product-image/results/${splitTask.outputResultIds[1]}/file`).then(response => response.arrayBuffer()).then(bytes => sharp(Buffer.from(bytes)).ensureAlpha().raw().toBuffer());
-  }).then(pixels => { assert.equal(pixels[3], 0); assert.equal(pixels[(30 * 80 + 40) * 4 + 3], 255); return submit({ operation: 'recognize-text' }); }).then(task => {
+  }).then(pixels => {
+    assert.equal(pixels[3], 0); assert.equal(pixels[(30 * 80 + 40) * 4 + 3], 255); assert.equal(pixels[(40 * 80 + 8) * 4 + 3], 0);
+    return fetch(`${base}/product-image/results/${splitTask.outputResultIds[2]}/file`).then(response => response.arrayBuffer()).then(bytes => sharp(Buffer.from(bytes)).ensureAlpha().raw().toBuffer());
+  }).then(pixels => { assert.equal(pixels[(30 * 80 + 40) * 4 + 3], 0); assert.equal(pixels[(40 * 80 + 8) * 4 + 3], 255); return submit({ operation: 'recognize-text' }); }).then(task => {
     textTask = task; assert.equal(task.outputLayers[1].type, 'text'); assert.equal(task.outputLayers[1].text, 'COFFEE');
     return send('/image-tools/tasks', { sessionId, resultId, input: { operation: 'erase', sourceAssetId: source.id, maskAssetId: emptyMask.id } }).then(({ body }) => wait(body.id));
   }).then(task => { assert.equal(task.status, 'failed'); assert.match(task.error, /涂抹/); return send('/image-tools/tasks', { sessionId, resultId, input: { operation: 'edit', sourceAssetId: source.id, maskAssetId: null, prompt: 'WAIT_CANCEL' } }); }).then(({ status, body }) => { assert.equal(status, 201, JSON.stringify(body)); return new Promise(done => setTimeout(done, 30)).then(() => send(`/image-tools/tasks/${body.id}/cancel`, {})); }).then(({ status, body }) => {

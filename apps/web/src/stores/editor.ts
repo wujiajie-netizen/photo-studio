@@ -1,5 +1,5 @@
 import { computed, ref } from 'vue';
-import { defineStore } from 'pinia';
+import { acceptHMRUpdate, defineStore } from 'pinia';
 import { validateEditorContent, type EditorContent, type EditorDocument, type EditorLayer } from '@photo-studio/shared';
 import { request } from '../api';
 
@@ -39,6 +39,13 @@ export const useEditorStore = defineStore('editor', () => {
     const value = content.value?.layers.find((item) => item.id === id); if (!value || value.locked) return;
     Object.assign(value, values); commit();
   }
+  function fitText() {
+    const value = layer.value; if (value?.type !== 'text' || value.locked) return;
+    /* 内容和字距变化时增高文字框，保持原宽度与位置，避免换行后截断文案。 */
+    const context = globalThis.document.createElement('canvas').getContext('2d')!; context.font = `${value.fontStyle ?? 'normal'} ${value.fontSize}px "${value.fontFamily}"`;
+    const lines = value.text.split('\n').reduce((count, text) => count + Math.max(1, Math.ceil((context.measureText(text).width + Math.max(0, value.letterSpacing ?? 0) * text.length) / value.width)), 0);
+    value.height = Math.min(16384, Math.max(value.height, Math.ceil((lines + 1) * value.fontSize * (value.lineHeight ?? 1))));
+  }
   function undo() { if (!canUndo.value) return; content.value = copy(history.value[--position.value]); ++changes.value; error.value = ''; schedule(); }
   function redo() { if (!canRedo.value) return; content.value = copy(history.value[++position.value]); ++changes.value; error.value = ''; schedule(); }
   function save(): Promise<void> {
@@ -58,5 +65,7 @@ export const useEditorStore = defineStore('editor', () => {
     return pending;
   }
   function close() { ++version; if (timer) clearTimeout(timer); timer = null; }
-  return { document, content, selected, layer, loading, saving, error, dirty, canUndo, canRedo, load, commit, updateLayer, undo, redo, save, close };
+  return { document, content, selected, layer, loading, saving, error, dirty, canUndo, canRedo, load, commit, updateLayer, fitText, undo, redo, save, close };
 });
+
+if (import.meta.hot) import.meta.hot.accept(acceptHMRUpdate(useEditorStore, import.meta.hot));

@@ -42,7 +42,7 @@ test('editor preserves layers across restart, rejects stale revisions and invali
     .then(({ body }) => wait(body.id)).then(({ body }) => { result = body[0]; return send('/editor/documents', { resultId: result.id }); })
     .then(({ body }) => {
       document = body; assert.equal(document.revision, 0); assert.equal(document.layers[0].resultId, result.id);
-      content = { name: '编辑后的商品', width: 1024, height: 1024, background: '#fafafa', layers: [...document.layers, { id: randomUUID(), type: 'text', name: '卖点', x: 10, y: 20, width: 600, height: 100, rotation: 15, opacity: .8, visible: true, locked: false, text: '净含量 200 克', fontSize: 48, fontFamily: 'Microsoft YaHei', fill: '#202020', align: 'center' }], revision: 0 };
+      content = { name: '编辑后的商品', width: 1024, height: 1024, background: '#fafafa', layers: [...document.layers, { id: randomUUID(), type: 'text', name: '卖点', x: 10, y: 20, width: 600, height: 100, rotation: 15, opacity: .8, visible: true, locked: false, text: '净含量 200 克', fontSize: 48, fontFamily: 'KaiTi', fill: '#202020', align: 'center' }], revision: 0 };
       const transform = { x: 40, y: 50, width: 200, height: 160, rotation: 20, opacity: .7, visible: true, locked: false };
       Object.assign(content.layers[1], { fontStyle: 'bold italic', textDecoration: 'underline', letterSpacing: 2, lineHeight: 1.3 });
       content.layers[0].adjustments = { brightness: .1, contrast: 20, saturation: -.3, blur: 2 };

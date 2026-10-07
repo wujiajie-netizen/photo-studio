@@ -1,5 +1,11 @@
 # 技术架构
 
+## 创作场景与编辑文档（2026-10-07）
+
+每个作品继续使用现有 EditorDocument；同页和独立编辑器共用图片、素材、文字、形状、画笔、调色和自动保存。CreationScene 独立保存会话内画板 `{ resultId, x, y }`、视口 `{ x, y, zoom }`、selectedId 与 revision，SQLite `creation_scenes` 以 session_id 为主键。GET/PATCH `/api/editor/scenes/:sessionId` 校验所属会话与有限坐标；版本冲突拒绝覆盖，相同已保存重发返回当前值。
+
+图片工具使用 `/api/image-tools/tasks/session/:sessionId/events` 聚合同会话进度，每会话一条 SSE；结果与编辑文档原子保存。拆层先识字和清字，再分析最多 8 个前景元素，独立蒙版提取原像素，整体重建空背景。局部改图、消除和无痕改字仍按原尺寸遮罩逐像素保留外部区域。独立任务目录和统一 AgentModelProvider 边界保持不变。
+
 ## 本地拓扑
 
 ```text

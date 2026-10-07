@@ -78,9 +78,12 @@ export class ProductCanvas {
     const node = id ? this.layer.findOne(`#${id}`) : null;
     this.transformer.nodes(node && item?.visible && !item.locked ? [node] : []); this.layer.batchDraw();
   }
-  export(): Promise<Blob> {
+  export(format: 'png' | 'jpeg' = 'png', multiplier = 1): Promise<Blob> {
     const selected = this.selected; this.transformer.nodes([]); this.layer.draw();
-    return this.stage.toBlob({ pixelRatio: 1 / this.scale, mimeType: 'image/png' }).then((blob) => {
+    const picture = this.stage.toCanvas({ pixelRatio: multiplier / this.scale });
+    /* JPEG 没有透明通道，导出时铺白底；画布文档与 PNG 的透明背景保持原样。 */
+    if (format === 'jpeg') { const context = picture.getContext('2d')!; context.globalCompositeOperation = 'destination-over'; context.fillStyle = '#ffffff'; context.fillRect(0, 0, picture.width, picture.height); }
+    return new Promise<Blob | null>(resolve => picture.toBlob(resolve, `image/${format}`, .92)).then((blob) => {
       this.select(selected); if (!blob) throw new Error('无法导出画布，请重试。'); return blob;
     }).catch((error) => { this.select(selected); throw error; });
   }

@@ -22,6 +22,16 @@
 
 2026-10-07 用户明确同意本方案及后续字段和相关接入操作。基础图层已接入，图片工具任务继续按此结构实现；验证拦截时告知用户，由用户解除后继续实测。
 
+### 场景、文字和图片属性补充
+
+多画板使用 `CreationScene = { boards: { resultId: string; x: number; y: number }[]; viewport: { x: number; y: number; zoom: number }; selectedId: string | null; revision: number }`。GET/PATCH `/api/editor/scenes/:sessionId` 读写；坐标范围 ±100 万，缩放 .03–3，最多 2000 个画板，必须引用所属会话结果。旧会话默认空布局，无需改写旧文档。
+
+EditorTextLayer 保留原字段，新增可选 `fontStyle: 'normal' | 'bold' | 'italic' | 'bold italic'`、`textDecoration: '' | 'underline' | 'line-through'`、`letterSpacing: -20..100`、`lineHeight: .5..5`。界面与服务端共用字体白名单 Microsoft YaHei、SimSun、SimHei、KaiTi、Arial、Georgia、Times New Roman。图片和素材图层可选 `adjustments: { brightness: -1..1; contrast: -100..100; saturation: -2..2; blur: 0..30 }`，四项必须齐全。未使用的旧文档不添加字段。
+
+拆层内部模型返回严格 `{ objects: { name: string; x: number; y: number; width: number; height: number }[] }`，最多 8 个真实前景元素，第一项为主要商品，独立装饰按视觉元素分组。每项生成原尺寸透明图层，重叠边缘不重复叠加；整体重建背景，真实文字另建文字层。无文字拆层允许空文字数组，单独识字没有发现文字则提示添加文字。模型输出坐标和名称均校验，任何分析失败都不保存半份结果。
+
+工具聚合 SSE：`/api/image-tools/tasks/session/:sessionId/events`；保留单任务 SSE 接口。下载 PNG/JPG 与尺寸倍率由同一画布导出，无新增业务任务；倍率是输出尺寸，AI 超清仍走真实图像任务。
+
 ### 编辑图层
 
 保留图片、文字与公共变换字段。新增两个联合类型：
@@ -77,6 +87,10 @@ interface ImageToolTask {
 遮罩通过已有素材上传保存原尺寸 PNG：白色表示处理区域，黑色表示保留区域，服务器校验尺寸。局部生成后由应用按遮罩合成，保留区域不依赖模型自行保持。生成、识字和图层分析仍经过 AgentModelProvider 与 Codex CLI；不引入 API Key 或本地扩散模型。
 
 ### 完成验证
+
+最新进展（2026-10-07 07:29，优先于以下阶段记录）：多画板、标题拖动、绝对缩放、布局/视口/选择持久化、文字放置与格式、斜向箭头、素材库、自有版式、调色和 PNG/JPG 导出已接入并进行真实交互验收。八类图片工具已有真实成功记录，保留像素与扩图原区域有逐像素检查；批量结果见 `data/runs/creation-flow-check-1791294990605/tool-quality-20261007.json`。拆层第一次隐藏装饰发现轮廓残留，第二次补全有接缝；第三次整体背景复测 `e1cb404b-4c1d-497c-8a27-9bc9db80af76` 已实际检查背景平滑、无残影，商品、散落咖啡豆和两行文字独立；移动撤销、显隐恢复与刷新均通过，证据 `split-smooth-background-final.json`。扩展字体、字距/行高实际持久化通过；最终构建、类型检查、ESLint 与 17 项自动测试通过。原 02:49 的“复测中”和“无限画板尚未接入”均为历史状态。
+
+参考站本轮实际新增文字后出现可编辑文字和字体格式浮动条，模板/素材/图片库及分类可打开，导入菜单实际包含图片与视频，视频排除。证据 `output/playwright/designkit/text-and-materials-20261007.jpg`。参考页当前部分操作超时、超清存在会员提示，未越过限制；官方说明与实际操作证据分开记录。
 
 当前进展（2026-10-07）：基础形状/画笔/上传素材图层、浮动工具条、独立自由裁剪和涂抹控制、图片工具任务、SSE、停止、重试、同会话及项目结果和编辑文档持久化已接入。扩图正在使用外扩边框和比例控制；无限多画板尚未接入。基础图层持久化回归及工具集成测试通过，全套 17 项自动测试通过。
 

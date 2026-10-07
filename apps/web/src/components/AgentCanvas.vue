@@ -130,7 +130,8 @@ function submitTool(parameters: { operation: ImageToolInput['operation']; mask?:
     return request<ImageToolTask>('/image-tools/tasks', { method: 'POST', body: JSON.stringify({ sessionId: props.sessionId, resultId, input }) });
   }).then(task => {
     if (!task || current !== version) return;
-    maskMode.value = null; toolSettings.value = null; toolTasks.value.unshift(task); subscribeTool(task, current); fit();
+    /* SSE 可能先于提交响应到达；保留已有的最新进度，避免重复记录堵住后续操作。 */
+    maskMode.value = null; toolSettings.value = null; if (!toolTasks.value.some(value => value.id === task.id)) toolTasks.value.unshift(task); subscribeTool(task, current); fit();
   }).catch((reason: Error) => { if (current === version) error.value = reason.message; }).finally(() => { toolSubmitting.value = false; });
 }
 function applyMask(mask: Blob, prompt: string) {

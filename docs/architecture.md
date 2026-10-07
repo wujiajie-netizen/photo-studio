@@ -1,5 +1,13 @@
 # 技术架构
 
+## 本地图片编辑实验分支（2026-10-07）
+
+用户授权在 `codex/local-image-layer-tools` 保留整图生成，试验本地识字、抠图和拆层。商品图、套图、详情模块与复杂改图仍由 Codex 内置生图执行。`AgentModelProvider.processImage` 统一调度本地专用工具：PaddleOCR 的 PP-OCRv5 ONNX（RapidOCR）、BiRefNet、SAM 2.1 和 LaMa；业务层不读取模型原始输出。识字和抠图不调用 Codex；拆层清字后保留一次 Codex 前景语义分组，再在本地提取像素和修复背景，不再逐层生图生成蒙版。
+
+沿用 ImageToolInput、ImageToolTask 和 EditorDocument，不新增前端请求字段或数据库表。运行环境和权重放在 `data/runtimes/image-tools`，任务输入、蒙版、输出与日志放在独立 `data/runs/image-tool-*/local-*`。任务执行阶段不下载模型；安装脚本预先下载并核对 SHA256。输出尺寸、图层格式、坐标和来源均校验，失败不保存半份结果，取消中止本地进程。本分支采用局部修复；下文原“整体重建背景”的描述保留为 Codex 版历史实现。
+
+字体从编辑器已有白名单估算匹配，不保证恢复原字体。残字检测通过不代表视觉无接缝；透明材质、复杂投影、重叠遮挡及大面积背景补全必须单独验收。具体安装和验证见 `local-image-tools.md`。
+
 ## 创作场景与编辑文档（2026-10-07）
 
 每个作品继续使用现有 EditorDocument；同页和独立编辑器共用图片、素材、文字、形状、画笔、调色和自动保存。CreationScene 独立保存会话内画板 `{ resultId, x, y }`、视口 `{ x, y, zoom }`、selectedId 与 revision，SQLite `creation_scenes` 以 session_id 为主键。GET/PATCH `/api/editor/scenes/:sessionId` 校验所属会话与有限坐标；版本冲突拒绝覆盖，相同已保存重发返回当前值。

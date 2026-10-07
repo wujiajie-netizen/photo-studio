@@ -80,12 +80,17 @@ export class ProductCanvas {
   }
   export(format: 'png' | 'jpeg' = 'png', multiplier = 1): Promise<Blob> {
     const selected = this.selected; this.transformer.nodes([]); this.layer.draw();
-    const picture = this.stage.toCanvas({ pixelRatio: multiplier / this.scale });
+    /* 按文档尺寸导出，避免预览缩放的浮点误差少一行像素；处理工具必须拿到完整原尺寸。 */
+    let picture: HTMLCanvasElement;
+    try {
+      this.stage.scale({ x: 1, y: 1 });
+      picture = this.stage.toCanvas({ width: this.content!.width, height: this.content!.height, pixelRatio: multiplier });
+    } finally { this.stage.scale({ x: this.scale, y: this.scale }); this.select(selected); }
     /* JPEG 没有透明通道，导出时铺白底；画布文档与 PNG 的透明背景保持原样。 */
     if (format === 'jpeg') { const context = picture.getContext('2d')!; context.globalCompositeOperation = 'destination-over'; context.fillStyle = '#ffffff'; context.fillRect(0, 0, picture.width, picture.height); }
     return new Promise<Blob | null>(resolve => picture.toBlob(resolve, `image/${format}`, .92)).then((blob) => {
-      this.select(selected); if (!blob) throw new Error('无法导出画布，请重试。'); return blob;
-    }).catch((error) => { this.select(selected); throw error; });
+      if (!blob) throw new Error('无法导出画布，请重试。'); return blob;
+    });
   }
   destroy() { ++this.version; this.stage.destroy(); this.images.clear(); }
 }

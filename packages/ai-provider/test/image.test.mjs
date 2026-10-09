@@ -14,9 +14,10 @@ test('Codex image transport accepts actual PNG events and rejects text-only succ
   const originalPath = process.env.PHOTO_STUDIO_CODEX_PATH;
   process.env.PHOTO_STUDIO_CODEX_PATH = process.execPath;
   context.mock.method(childProcess, 'execFile', (_file, args, _options, callback) => queueMicrotask(() => callback(null, args[0] === '--version' ? 'codex-cli 0.139.0' : args[0] === 'login' ? 'Logged in using ChatGPT' : '--json --output-schema --ignore-user-config --ignore-rules', '')));
-  let mode = 'success'; let hasSource = true; const invocations = [];
+  let mode = 'success'; let hasSource = true; let hasGuide = false; const invocations = [];
   const source = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 0, 1, 2]);
   const generated = Buffer.concat([source, Buffer.from('actual image payload')]);
+  const guide = Buffer.concat([source, Buffer.from('selection guide')]);
   context.mock.method(childProcess, 'spawn', (_file, args, options) => {
     assert.deepEqual(args.slice(0, 2), ['app-server', '--stdio']);
     assert.equal(options.shell, false); assert.equal(options.windowsHide, true);
@@ -44,6 +45,7 @@ test('Codex image transport accepts actual PNG events and rejects text-only succ
           assert.equal(request.params.threadId, threadId);
           if (hasSource) { assert.equal(request.params.input[1].type, 'localImage'); assert.deepEqual(readFileSync(request.params.input[1].path), source); }
           else { assert.equal(request.params.input.length, 1); assert.equal(request.params.input[0].type, 'text'); assert.ok(!readdirSync(options.cwd).includes('source.png')); }
+          if (hasGuide) { assert.equal(request.params.input.length, 3); assert.equal(request.params.input[2].type, 'localImage'); assert.deepEqual(readFileSync(request.params.input[2].path), guide); assert.notEqual(request.params.input[1].path, request.params.input[2].path); }
         }
         queueMicrotask(() => {
           emit({ id: request.id, result });
@@ -64,7 +66,9 @@ test('Codex image transport accepts actual PNG events and rejects text-only succ
     assert.equal(readFileSync(join(directory, run, 'input.txt'), 'utf8'), '测试商品图');
     assert.ok(!readFileSync(join(directory, run, 'events.jsonl'), 'utf8').includes('must-not-be-logged'));
     hasSource = false; return provider.generateImage(randomUUID(), null, '文字生成咖啡示意', new AbortController().signal);
-  }).then(data => { assert.deepEqual(data, generated); hasSource = true; mode = 'text'; return assert.rejects(generate(), /未返回实际图片/); })
+  }).then(data => { assert.deepEqual(data, generated); hasSource = true; hasGuide = true; return provider.generateImage(randomUUID(), source, '原图与选区示意', new AbortController().signal, guide); })
+    .then(data => { assert.deepEqual(data, generated); hasGuide = false; return assert.rejects(provider.generateImage(randomUUID(), null, '无原图示意', new AbortController().signal, guide), /示意无效/); })
+    .then(() => { mode = 'text'; return assert.rejects(generate(), /未返回实际图片/); })
     .then(() => { mode = 'tool'; return assert.rejects(generate(), /生图以外/); })
     .then(() => { mode = 'invalid'; return assert.rejects(generate(), /无法读取/); })
     .then(() => { mode = 'quota'; return assert.rejects(generate(), /额度/); })

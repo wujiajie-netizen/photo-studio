@@ -1,5 +1,6 @@
 import 'reflect-metadata';
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join, resolve, sep } from 'node:path';
@@ -18,20 +19,23 @@ import { ProjectsController } from '../dist/projects.controller.js';
 import { ProjectsService } from '../dist/projects.service.js';
 import { AGENT_MODEL_PROVIDER } from '../dist/agent.service.js';
 import { StorageService } from '../dist/storage.service.js';
+import { EditorService } from '../dist/editor.service.js';
+import { EditorController } from '../dist/editor.controller.js';
 
 test('commerce generates modules, isolates partial failure, retries one item and exports ZIP/long PNG across restart', () => {
   const directory = mkdtempSync(join(tmpdir(), 'photo-studio-commerce-'));
   const original = process.env.PHOTO_STUDIO_DATA_DIR; process.env.PHOTO_STUDIO_DATA_DIR = directory;
   let app; let base; let parameters; let task; let saved; let project; let copy;
-  let calls = 0;
-  const render = (input, value, index, signal) => {
+  let calls = 0; const contexts = [];
+  const render = (input, value, index, signal, context) => {
+    contexts.push(context);
     ++calls;
     if (calls === 2) return Promise.reject(new Error('one module failed'));
     return renderMockProductImage(input, value, index, signal);
   };
   const provider = { run() { return Readable.from([{ type: 'completed', result: copy }]); }, cancel() { return Promise.resolve(); } };
   class TestModule {}
-  Module({ controllers: [CommerceController, ProductImageController, ProjectsController], providers: [StorageService, ProjectsService, ProductImageService, CommerceService, { provide: PRODUCT_IMAGE_TOOL, useValue: render }, { provide: AGENT_MODEL_PROVIDER, useValue: provider }] })(TestModule);
+  Module({ controllers: [CommerceController, ProductImageController, ProjectsController, EditorController], providers: [StorageService, ProjectsService, ProductImageService, CommerceService, EditorService, { provide: PRODUCT_IMAGE_TOOL, useValue: render }, { provide: AGENT_MODEL_PROVIDER, useValue: provider }] })(TestModule);
   function start() {
     return NestFactory.create(TestModule, { logger: false }).then((instance) => { app = instance; app.setGlobalPrefix('api'); return app.listen(0, '127.0.0.1'); })
       .then(() => { base = `http://127.0.0.1:${app.getHttpServer().address().port}/api`; });
@@ -66,12 +70,28 @@ test('commerce generates modules, isolates partial failure, retries one item and
     }).then(() => send(`/commerce/tasks/${task.id}/retry`, {})).then(() => wait(task.id, 'succeeded'))
     .then((value) => {
       task = value; assert.equal(calls, 4); assert.equal(task.progress, 100); assert.deepEqual(task.items.map((item) => item.status), ['succeeded', 'succeeded', 'succeeded']);
+      assert.ok(contexts.every(context => JSON.stringify(context.parameters) === JSON.stringify(parameters))); assert.deepEqual(contexts.map(context => context.sectionIndex), [0, 1, 2, 1]);
       return Promise.all([
         fetch(`${base}/commerce/tasks/${task.id}/export?format=zip`).then((response) => { assert.equal(response.status, 200); return response.arrayBuffer(); }).then((bytes) => assert.deepEqual(Object.keys(unzipSync(new Uint8Array(bytes))), ['1.png', '2.png', '3.png'])),
         fetch(`${base}/commerce/tasks/${task.id}/export?format=long`).then((response) => { assert.equal(response.status, 200); return response.arrayBuffer(); }).then((bytes) => sharp(Buffer.from(bytes)).metadata()).then((metadata) => { assert.equal(metadata.width, 768); assert.equal(metadata.height, 3072); }),
         send('/projects', { name: '套图验收项目' }).then(({ body }) => { project = body; })
       ]);
-    }).then(() => send(`/product-image/results/${task.items[0].resultId}`, { projectId: project.id }, 'PATCH'))
+    }).then(() => send('/editor/documents', { resultId: task.items[0].resultId })).then(({ body }) => {
+      assert.equal(body.layers.length, 3); assert.equal(body.layers[1].text, parameters.sections[0].title); assert.equal(body.layers[2].text, parameters.sections[0].content);
+      const { name, background, layers, revision } = body;
+      layers[0].visible = false; layers[1].text = 'Edited title';
+      layers.push({ id: randomUUID(), type: 'shape', name: 'Edited overlay', x: 0, y: 0, width: 640, height: 800, rotation: 0, opacity: 1, visible: true, locked: false, shape: 'rectangle', fill: '#ff0000', stroke: 'transparent', strokeWidth: 0 });
+      return send(`/editor/documents/${body.id}`, { name, width: 640, height: 800, background, layers, revision }, 'PATCH');
+    }).then(({ status }) => {
+      assert.equal(status, 200);
+      return fetch(`${base}/commerce/tasks/${task.id}/export?format=zip`).then(response => response.arrayBuffer()).then(bytes => {
+        const files = unzipSync(new Uint8Array(bytes));
+        return sharp(Buffer.from(files['1.png'])).raw().toBuffer({ resolveWithObject: true }).then(({ data, info }) => { assert.equal(info.width, 640); assert.equal(info.height, 800); assert.deepEqual([...data.subarray(0, 4)], [255, 0, 0, 255]); });
+      });
+    }).then(() => fetch(`${base}/commerce/tasks/${task.id}/export?format=long`).then(response => response.arrayBuffer()).then(bytes => sharp(Buffer.from(bytes)).raw().toBuffer({ resolveWithObject: true })).then(({ data, info }) => {
+      assert.equal(info.width, 768); assert.equal(info.height, 2848); const pixel = (50 * info.width + 64) * info.channels; assert.deepEqual([...data.subarray(pixel, pixel + 4)], [255, 0, 0, 255]);
+    })).then(() => fetch(`${base}/product-image/results/${task.items[0].resultId}/file`).then(response => response.arrayBuffer()).then(bytes => sharp(Buffer.from(bytes)).metadata()).then(metadata => { assert.equal(metadata.width, 768); assert.equal(metadata.height, 1024); }))
+    .then(() => send(`/product-image/results/${task.items[0].resultId}`, { projectId: project.id }, 'PATCH'))
     .then(({ body }) => { saved = body; assert.equal(saved.projectId, project.id); return send(`/projects/${project.id}/results`); })
     .then(({ body }) => { assert.deepEqual(body, [saved]); return send(`/commerce/tasks/${task.id}/items/${task.items[0].id}/retry`, {}); })
     .then(() => wait(task.id, 'succeeded')).then((value) => { assert.notEqual(value.items[0].resultId, saved.id); task = value; return app.close(); })

@@ -67,10 +67,10 @@ function align(position: 'left' | 'center' | 'right' | 'top' | 'middle' | 'botto
   if (position === 'top') layer.y = 0; if (position === 'middle') layer.y = (content.height - layer.height) / 2; if (position === 'bottom') layer.y = content.height - layer.height;
   store.commit();
 }
-function download(format: 'png' | 'jpeg', scale: number, name: string) {
+function download(format: 'png' | 'jpeg', scale: number, name: string, quality: number) {
   if (!canvas || exporting.value) return;
   exporting.value = true;
-  painting.then(() => { if (renderError.value) throw new Error(renderError.value); return canvas!.export(format, scale); }).then((blob) => {
+  painting.then(() => { if (renderError.value) throw new Error(renderError.value); return canvas!.export(format, scale, quality); }).then((blob) => {
     const url = URL.createObjectURL(blob); const link = document.createElement('a'); link.href = url; link.download = `${name}.${format === 'jpeg' ? 'jpg' : 'png'}`; link.click(); exportOptions.value = false; setTimeout(() => URL.revokeObjectURL(url), 1000);
   }).catch((failure: Error) => { renderError.value = failure.message; }).finally(() => { exporting.value = false; });
 }
@@ -138,7 +138,7 @@ onBeforeUnmount(() => { ++loadVersion; mounted = false; observer?.disconnect(); 
 
 <style scoped lang="scss">
 .editor-page { padding: 16px 24px 24px; }
-.editor-heading { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 16px; h1 { font-size: 17px; font-weight: 550; flex: 1; min-width: 160px; overflow-wrap: anywhere; } span { font-size: 11px; color: var(--muted); } .back { display: inline-flex; gap: 6px; align-items: center; font-size: 12px; color: var(--muted); } .button { padding: 8px 12px; font-size: 12px; } }
+.editor-heading { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 16px; padding: 14px 18px; border: 1px solid var(--border); border-radius: 14px; background: var(--surface); h1 { font-size: 17px; font-weight: 550; flex: 1; min-width: 160px; overflow-wrap: anywhere; } span { font-size: 11px; color: var(--muted); } .back { display: inline-flex; gap: 6px; align-items: center; font-size: 12px; color: var(--muted); } .button { padding: 8px 12px; font-size: 12px; } }
 .editor-layout { display: grid; grid-template-columns: 220px minmax(250px, 1fr) 250px; gap: 16px; height: calc(100vh - 180px); min-height: 500px; }
 .layers-panel, .properties-panel {
   overflow-y: auto; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 16px;
@@ -150,7 +150,7 @@ onBeforeUnmount(() => { ++loadVersion; mounted = false; observer?.disconnect(); 
 .layers-panel { ul { list-style: none; padding: 0; margin: 18px 0 0; } li { display: flex; align-items: center; gap: 5px; border: 1px solid var(--border); padding: 8px; margin-bottom: 8px; border-radius: 6px; } li.selected { border-color: var(--text); background: var(--page); } li button { border: 0; background: transparent; padding: 0; display: flex; color: var(--text-secondary); } .layer-name { flex: 1; overflow-wrap: anywhere; text-align: left; font-size: 11px; } }
 .history-actions, .layer-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; button { display: inline-flex; align-items: center; gap: 3px; font-size: 11px; border: 1px solid var(--border); border-radius: 5px; background: var(--surface); padding: 6px; } }
 .align-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 16px; button { font-size: 10px; border: 1px solid var(--border); border-radius: 5px; padding: 6px; background: var(--surface); } }
-.canvas-area { display: flex; justify-content: center; align-items: center; overflow: hidden; background: #e9e9e7; border: 1px solid var(--border); border-radius: var(--radius-sm); }
+.canvas-area { display: flex; justify-content: center; align-items: center; overflow: hidden; background: radial-gradient(#dad5e6 .8px, transparent .8px) 0 0 / 20px 20px, #f0eef6; border: 1px solid var(--border); border-radius: var(--radius-sm); }
 .canvas { box-shadow: 0 3px 16px rgb(0 0 0 / 12%); }
 .error { padding: 12px; margin-bottom: 16px; color: var(--error); font-size: 12px; background: var(--surface); border: 1px solid var(--error); border-radius: 8px; button { border: 0; background: transparent; text-decoration: underline; color: inherit; } }
 @media (max-width: 1100px) { .editor-layout { grid-template-columns: 180px minmax(200px, 1fr) 210px; gap: 10px; } .editor-page { padding-inline: 16px; } .layers-panel, .properties-panel { padding: 12px; } }

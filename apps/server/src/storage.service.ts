@@ -158,6 +158,21 @@ export class StorageService implements OnModuleDestroy {
         project_id TEXT REFERENCES projects(id)
       ) STRICT;
       CREATE INDEX IF NOT EXISTS image_tool_results_project ON image_tool_results(project_id, created_at);
+      CREATE TABLE IF NOT EXISTS brand_presets (
+        id TEXT PRIMARY KEY NOT NULL,
+        name TEXT NOT NULL CHECK(length(name) BETWEEN 1 AND 80),
+        style TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      ) STRICT;
+      CREATE TABLE IF NOT EXISTS creation_presets (
+        id TEXT PRIMARY KEY NOT NULL,
+        name TEXT NOT NULL CHECK(length(name) BETWEEN 1 AND 80),
+        kind TEXT NOT NULL CHECK(kind IN ('product-image', 'product-kit', 'detail-page')),
+        parameters TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      ) STRICT;
     `);
     /* 旧库只放宽素材列；迁移前保存完整 SQLite 快照，事务内保留原任务和结果引用。 */
     if (this.database.prepare('PRAGMA table_info(product_image_tasks)').all().some(column => column.name === 'source_asset_id' && column.notnull === 1)) {

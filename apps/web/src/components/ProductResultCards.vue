@@ -7,12 +7,12 @@ defineEmits<{ save: [result: ProductImageResult]; retry: [result: ProductImageRe
 <template>
   <div class="product-results">
     <article v-for="result in results" :key="result.id">
-      <a class="preview" :href="`/api/product-image/results/${result.id}/file`" target="_blank" rel="noopener" :aria-label="`预览 ${result.name}`"><img :src="`/api/product-image/results/${result.id}/file`" :alt="result.name" /></a>
+      <a class="preview" :href="`/api/editor/results/${result.id}/file`" target="_blank" rel="noopener" :aria-label="`预览 ${result.name}`"><img :src="`/api/editor/results/${result.id}/file`" :alt="result.name" loading="lazy" /></a>
       <div class="result-info"><h3>{{ result.name }}</h3><p>{{ result.width }} × {{ result.height }} · PNG</p><RouterLink v-if="result.projectId" :to="`/projects/${result.projectId}`" class="saved">已保存到项目 ↗</RouterLink></div>
       <footer>
         <RouterLink class="button secondary" :to="`/editor/${result.id}`">编辑</RouterLink>
         <button v-if="actions" class="button secondary" type="button" :disabled="busy" @click="$emit('save', result)">{{ result.projectId ? '更换项目' : '保存到项目' }}</button>
-        <a class="button secondary" :href="`/api/product-image/results/${result.id}/file?download=1`" download>下载</a>
+        <a class="button secondary" :href="`/api/editor/results/${result.id}/file`" :download="result.name">下载</a>
         <button v-if="actions" type="button" class="retry" :disabled="busy" @click="$emit('retry', result)">重新生成</button>
       </footer>
     </article>
@@ -22,9 +22,9 @@ defineEmits<{ save: [result: ProductImageResult]; retry: [result: ProductImageRe
 <style scoped lang="scss">
 .product-results {
   display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 20px;
-  article { overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); }
-  .preview { display: block; background: #f1f0ed; height: 270px; padding: 14px; }
-  img { width: 100%; height: 100%; object-fit: contain; }
+  article { overflow: hidden; border: 1px solid var(--border); border-radius: 18px; background: var(--surface); transition: box-shadow .25s, transform .25s; &:hover { box-shadow: var(--shadow-hover); transform: translateY(-3px); } }
+  .preview { display: block; background: linear-gradient(135deg, #f2eff8, #f5f6fa); height: 270px; padding: 14px; overflow: hidden; &:hover img { transform: scale(1.025); } }
+  img { width: 100%; height: 100%; object-fit: contain; transition: transform .4s; }
   .result-info { padding: 16px 16px 0; }
   h3 { font-size: 14px; font-weight: 550; overflow-wrap: anywhere; }
   p, .saved { font-size: 12px; color: var(--muted); }

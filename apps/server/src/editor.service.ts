@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { validateEditorContent, type EditorContent, type EditorDocument, type CreationScene } from '@photo-studio/shared';
 import { StorageService } from './storage.service';
 import { ProductImageService } from './product-image.service';
+import { renderEditorContent } from './editor-renderer';
 
 const columns = 'id, result_id AS resultId, project_id AS projectId, name, width, height, background, layers, revision, created_at AS createdAt, updated_at AS updatedAt';
 @Injectable()
@@ -41,6 +42,13 @@ export class EditorService {
     const result = this.images.result(row.resultId as string);
     return { ...row, projectId: result.projectId, layers: JSON.parse(row.layers as string) } as unknown as EditorDocument;
   }
+  exportResult(resultId: string): Promise<{ data: Buffer; width: number; height: number }> {
+    return this.exportDocument(this.open(resultId));
+  }
+  exportDocument(document: EditorDocument): Promise<{ data: Buffer; width: number; height: number }> {
+    const { name, width, height, background, layers } = document;
+    return renderEditorContent({ name, width, height, background, layers }, (kind, id) => kind === 'image' ? this.images.resultFile(id) : this.images.assetFile(id)).then(data => ({ data, width, height }));
+  }
   open(resultId: unknown): EditorDocument {
     if (typeof resultId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(resultId)) throw new BadRequestException('请选择有效的生成图片。');
     const result = this.images.result(resultId); this.images.resultFile(resultId);
@@ -60,6 +68,11 @@ export class EditorService {
     for (const layer of content.layers) {
       if (layer.type === 'image') this.images.resultFile(layer.resultId);
       if (layer.type === 'asset-image') this.images.assetFile(layer.assetId);
+      if (layer.type === 'asset-image' && layer.matteSourceAssetId) {
+        this.images.assetFile(layer.matteSourceAssetId);
+        const original = this.images.asset(layer.matteSourceAssetId); const image = this.images.asset(layer.assetId);
+        if (original.width !== image.width || original.height !== image.height) throw new BadRequestException('原素材与抠图修整图片尺寸必须一致。');
+      }
     }
     /* 带版本条件保存，防止其他窗口覆盖文档；冲突时保留客户端内容，用户可另行重新读取。 */
     const change = this.storage.database.prepare('UPDATE editor_documents SET name = ?, width = ?, height = ?, background = ?, layers = ?, revision = revision + 1, updated_at = ? WHERE id = ? AND revision = ?').run(content.name.trim(), content.width, content.height, content.background, JSON.stringify(content.layers), new Date().toISOString(), id, revision);

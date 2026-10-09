@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import { computed, onUnmounted, ref, watch } from 'vue';
 import { ChevronDown, ImagePlus, LoaderCircle, Play, Square, X } from '@lucide/vue';
-import { PRODUCT_UPLOAD_LIMIT, type AgentExecution, type AgentParameters, type AgentStepInput, type ProductAsset, type Project } from '@photo-studio/shared';
+import { PRODUCT_UPLOAD_LIMIT, type AgentExecution, type AgentParameters, type AgentStepInput, type CreationPreset, type ProductAsset, type Project } from '@photo-studio/shared';
 import { request } from '../api';
+import BrandPresetPicker from './BrandPresetPicker.vue';
+import CreationPresetPanel from './CreationPresetPanel.vue';
 
 const props = defineProps<{ taskId: string; execution?: AgentExecution; active: boolean; loading: boolean; initialSource: string | null }>();
 const emit = defineEmits<{ started: [execution: AgentExecution]; ready: [] }>();
@@ -13,6 +15,21 @@ const busy = computed(() => submitting.value || !!props.execution && ['queued', 
 const total = computed(() => steps.value.reduce((count, step) => count + (step.tool === 'product-image' ? step.parameters.count : step.parameters.sections.length), 0));
 const labels = { queued: '等待生成', running: '正在生成与检查', succeeded: '作品已保存', failed: '本次生成未完成', cancelled: '已停止生成' };
 const scenes = { white: '白色影棚', warm: '暖色自然光', cool: '冷色柔光' };
+function applyPreset(index: number, preset: CreationPreset, restoreCopy: boolean) {
+  const step = steps.value[index];
+  if (step.tool !== preset.kind) return;
+  if (step.tool === 'product-image' && preset.kind === 'product-image') {
+    step.parameters = { ...preset.parameters, sourceAssetId: assetId.value, description: restoreCopy ? preset.parameters.description : step.parameters.description };
+  } else if (step.tool !== 'product-image' && preset.kind !== 'product-image') {
+    const current = step.parameters; const remaining = [...current.sections];
+    /* 默认只复用模块结构与视觉设置，当前商品事实保留，新增模块不带入旧商品文案。 */
+    const sections = restoreCopy ? preset.parameters.sections : preset.parameters.sections.map(section => {
+      const index = remaining.findIndex(item => item.type === section.type);
+      return index === -1 ? { type: section.type, title: { hero: '商品展示', features: '核心卖点', usage: '使用场景', specification: '商品规格', comparison: '商品对比' }[section.type], content: '' } : remaining.splice(index, 1)[0];
+    });
+    step.parameters = { ...preset.parameters, sourceAssetId: assetId.value, productName: restoreCopy ? preset.parameters.productName : current.productName, sellingPoints: restoreCopy ? preset.parameters.sellingPoints : current.sellingPoints, sections };
+  }
+}
 let version = 0; let controller: AbortController | null = null;
 function prepare() {
   controller?.abort(); const current = ++version; controller = new AbortController();
@@ -89,7 +106,18 @@ watch(() => props.initialSource, value => { if (!props.execution && value !== as
         <div v-if="assetId" class="source-preview"><img :src="`/api/assets/${assetId}/file`" alt="本次创作使用的商品原图" /><button type="button" :disabled="preparing || uploading" aria-label="移除商品原图" @click="assetId = null; prepare()"><X :size="13" /></button></div>
         <label>保存位置<select v-model="projectId"><option :value="null">自动保存到本次会话项目</option><option v-for="project in projects" :key="project.id" :value="project.id">{{ project.name }}</option></select></label>
         <div v-for="(step, index) in steps" :key="index" class="step-options"><span v-if="steps.length > 1">{{ step.title }}</span><label>画幅<select v-model="step.parameters.ratio"><option>1:1</option><option>3:4</option><option>4:3</option><option>9:16</option></select></label><label>质量<select v-model="step.parameters.quality"><option value="standard">标准</option><option value="high">高清</option></select></label><label v-if="step.tool === 'product-image'">数量<select v-model="step.parameters.count"><option v-for="count in 4" :key="count" :value="count">{{ count }} 张</option></select></label></div>
+        <div v-for="(step, index) in steps" :key="`reuse-${index}`">
+          <CreationPresetPanel :kind="step.tool" :parameters="step.parameters" :disabled="busy || preparing || uploading || loading" @apply="(preset, restoreCopy) => applyPreset(index, preset, restoreCopy)" />
+          <label v-if="step.tool === 'product-image'">创作描述<textarea v-model="step.parameters.description" maxlength="1000" rows="3" :disabled="busy || preparing || uploading || loading" /></label>
+          <template v-else>
+            <BrandPresetPicker :model-value="step.parameters.brand ?? null" :disabled="busy || preparing || uploading || loading" @update:model-value="step.parameters.brand = $event" />
+            <label>商品名称<input v-model="step.parameters.productName" maxlength="80" :disabled="busy || preparing || uploading || loading" /></label>
+            <label>商品卖点<textarea :value="step.parameters.sellingPoints.join('\n')" rows="3" :disabled="busy || preparing || uploading || loading" @input="step.parameters.sellingPoints = ($event.target as HTMLTextAreaElement).value.split('\n').map(line => line.trim()).filter(Boolean)" /></label>
+            <div v-for="(section, sectionIndex) in step.parameters.sections" :key="sectionIndex"><label>模块 {{ sectionIndex + 1 }} 标题<input v-model="section.title" maxlength="80" :disabled="busy || preparing || uploading || loading" /></label><label>模块 {{ sectionIndex + 1 }} 文案<textarea v-model="section.content" maxlength="600" rows="3" :disabled="busy || preparing || uploading || loading" /></label></div>
+          </template>
+        </div>
       </div>
+      <p v-if="steps.length" class="observation">预计 {{ total }} 次生图、{{ steps.length }} 次结果检查；自动重试会增加调用，具体额度以账户实际使用为准。</p>
       <footer><span>Codex 生图 · 使用账户额度</span><button v-if="steps.length || preparing || loading" type="button" class="button" :disabled="busy || preparing || uploading || loading" @click="start"><Play :size="13" />{{ submitting ? '提交中…' : '开始生成' }}</button><button v-else type="button" class="button secondary" @click="prepare">{{ error ? '重试参数整理' : '使用这个方案' }}</button></footer>
     </template>
     <p v-if="error" class="error" role="alert">{{ error }}</p>
@@ -97,14 +125,14 @@ watch(() => props.initialSource, value => { if (!props.execution && value !== as
 </template>
 
 <style scoped lang="scss">
-.agent-creation { margin-top: 12px; border-top: 1px solid var(--border); padding-top: 12px; font-size: 11px; footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 12px; } footer > span, footer > a { color: var(--muted); font-size: 10px; } .button { padding: 8px 12px; font-size: 11px; } progress { width: 100%; height: 5px; accent-color: var(--text); margin-top: 8px; } }
+.agent-creation { margin-top: 12px; border-top: 1px solid var(--border); padding-top: 12px; font-size: 12px; line-height: 1.7; footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 12px; } footer > span, footer > a { color: var(--muted); font-size: 12px; } .button { padding: 8px 12px; font-size: 12px; font-weight: 500; } progress { width: 100%; height: 5px; accent-color: var(--accent); margin-top: 8px; border: 0; border-radius: 20px; overflow: hidden; } progress::-webkit-progress-bar { background: #eeedf5; border-radius: 20px; } progress::-webkit-progress-value { background: var(--accent); border-radius: 20px; } progress::-moz-progress-bar { background: var(--accent); border-radius: 20px; } }
 .generation-specs { display: flex; flex-wrap: wrap; gap: 6px; span { padding: 4px 7px; border-radius: 5px; background: var(--page); color: var(--text-secondary); } }
-.options-toggle { display: flex; gap: 6px; align-items: center; border: 0; background: transparent; color: var(--muted); font-size: 11px; padding: 10px 0 0; }
-.generation-options { display: grid; gap: 10px; margin-top: 12px; label { display: grid; gap: 5px; color: var(--text-secondary); } select { width: 100%; min-width: 0; padding: 7px; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; color: var(--text); font: inherit; } .upload-label { display: block; position: relative; padding: 8px; border: 1px dashed var(--border-strong); border-radius: 6px; cursor: pointer; text-align: center; } input { position: absolute; inset: 0; opacity: 0; width: 100%; cursor: pointer; } }
+.options-toggle { display: flex; gap: 6px; align-items: center; border: 0; background: transparent; color: var(--text-secondary); font-size: 12px; padding: 10px 0 0; &:hover { color: var(--accent); } }
+.generation-options { display: grid; gap: 10px; margin-top: 12px; label { display: grid; gap: 5px; color: var(--text-secondary); } select, input, textarea { width: 100%; min-width: 0; padding: 7px; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; color: var(--text); font: inherit; } .upload-label { display: block; position: relative; padding: 8px; border: 1px dashed var(--border-strong); border-radius: 6px; cursor: pointer; text-align: center; } input[type='file'] { position: absolute; inset: 0; opacity: 0; width: 100%; cursor: pointer; } }
 .step-options { display: flex; flex-wrap: wrap; gap: 8px; > span { flex-basis: 100%; } label { flex: 1; } }
 .source-preview { position: relative; width: 72px; img { width: 72px; height: 72px; object-fit: contain; border: 1px solid var(--border); border-radius: 6px; } button { position: absolute; right: -5px; top: -5px; border: 1px solid var(--border); border-radius: 50%; background: var(--surface); display: grid; place-items: center; padding: 3px; } }
 .preparation, .execution-status { display: flex; align-items: center; gap: 8px; color: var(--text-secondary); strong { margin-left: auto; font-weight: 500; } }
-.observation { margin-top: 8px; color: var(--muted); line-height: 1.7; overflow-wrap: anywhere; }
+.observation { margin-top: 8px; color: var(--text-secondary); line-height: 1.75; overflow-wrap: anywhere; }
 .error { margin-top: 10px; color: var(--error); line-height: 1.7; }
 .spinning { animation: spin 1.2s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }

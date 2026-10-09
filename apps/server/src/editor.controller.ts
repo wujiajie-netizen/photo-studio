@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Inject, Param, ParseUUIDPipe, Patch, Post } from '@nestjs/common';
+import { Body, Controller, Get, Header, Inject, Param, ParseUUIDPipe, Patch, Post, StreamableFile } from '@nestjs/common';
 import { EditorService } from './editor.service';
 @Controller('editor')
 export class EditorController {
@@ -6,6 +6,9 @@ export class EditorController {
   @Post('documents') open(@Body('resultId') resultId: unknown) { return this.editor.open(resultId); }
   @Get('documents/:id') document(@Param('id', new ParseUUIDPipe({ version: '4' })) id: string) { return this.editor.document(id); }
   @Patch('documents/:id') save(@Param('id', new ParseUUIDPipe({ version: '4' })) id: string, @Body() content: unknown) { return this.editor.save(id, content); }
+  @Get('results/:resultId/file') @Header('Cache-Control', 'no-store') file(@Param('resultId', new ParseUUIDPipe({ version: '4' })) resultId: string) {
+    return this.editor.exportResult(resultId).then(({ data }) => new StreamableFile(data, { type: 'image/png', disposition: 'inline' }));
+  }
   @Get('scenes/:sessionId') scene(@Param('sessionId', new ParseUUIDPipe({ version: '4' })) sessionId: string) { return this.editor.scene(sessionId); }
   @Patch('scenes/:sessionId') saveScene(@Param('sessionId', new ParseUUIDPipe({ version: '4' })) sessionId: string, @Body() content: unknown) { return this.editor.saveScene(sessionId, content); }
 }

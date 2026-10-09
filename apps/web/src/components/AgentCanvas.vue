@@ -15,9 +15,10 @@ import CanvasBoardPreview from './CanvasBoardPreview.vue';
 import CanvasShapeDraw from './CanvasShapeDraw.vue';
 import CanvasLibrary from './CanvasLibrary.vue';
 import CanvasExport from './CanvasExport.vue';
+import CutoutRefinement from './CutoutRefinement.vue';
 
 const props = defineProps<{ sessionId: string; taskIds: string[] }>();
-const emit = defineEmits<{ update: [state: { executions: AgentExecution[]; results: ProductImageResult[]; selectedId: string; loading: boolean }]; reference: [asset: ProductAsset, modifying: boolean] }>();
+const emit = defineEmits<{ update: [state: { executions: AgentExecution[]; results: ProductImageResult[]; selectedId: string; loading: boolean }]; reference: [asset: ProductAsset, modifying: boolean]; reveal: [resultId: string] }>();
 const executions = ref<AgentExecution[]>([]); const results = ref<ProductImageResult[]>([]);
 const activeExecution = computed(() => executions.value.find(execution => ['queued', 'running'].includes(execution.status)));
 const selectedId = ref(''); const selected = computed(() => results.value.find(result => result.id === selectedId.value));
@@ -36,6 +37,14 @@ const imageId = ref('');
 const cropping = ref(false); const tools = ref(false); const picked = ref(false);
 const maskMode = ref<'edit' | 'erase' | 'replace-text' | null>(null); const toolSubmitting = ref(false); const toolTasks = ref<ImageToolTask[]>([]);
 const activeTool = computed(() => toolTasks.value.find(task => task.status === 'running') ?? toolTasks.value.find(task => task.status === 'queued'));
+const refinement = ref<{ layerId: string; sourceAssetId: string; imageUrl: string } | null>(null); const refining = ref(false); const refinementError = ref('');
+const refinable = computed(() => {
+  const layer = editor.layer;
+  if (layer?.type === 'asset-image' && layer.matteSourceAssetId) return { layerId: layer.id, sourceAssetId: layer.matteSourceAssetId, imageUrl: `/api/assets/${layer.assetId}/file` };
+  if (layer?.type !== 'image') return null;
+  const task = toolTasks.value.find(task => task.status === 'succeeded' && (task.input.operation === 'cutout' && task.outputResultIds.includes(layer.resultId) || task.input.operation === 'split-layers' && task.outputResultIds.slice(1).includes(layer.resultId)));
+  return task ? { layerId: layer.id, sourceAssetId: task.input.sourceAssetId, imageUrl: `/api/product-image/results/${layer.resultId}/file` } : null;
+});
 const textMenu = ref(false); const toolSettings = ref<'upscale' | 'expand' | null>(null); const upscale = ref<2 | 4>(2);
 const expandBox = ref({ x: 0, y: 0, width: 1, height: 1 });
 const toolNames = { edit: 'AI 改图', erase: '无痕消除', 'replace-text': '无痕改字', cutout: '抠图', upscale: 'AI 超清', expand: 'AI 扩图', 'split-layers': '拆分图层', 'recognize-text': '编辑文字' };
@@ -52,10 +61,44 @@ let painting: Promise<void> = Promise.resolve();
 let start: { x: number; y: number; offsetX: number; offsetY: number } | null = null;
 const area = ref<HTMLDivElement | null>(null); const container = ref<HTMLDivElement | null>(null);
 const areaSize = ref({ width: 0, height: 0 });
+const flight = ref<{ resultId: string; left: number; top: number; width: number; height: number; ready: boolean } | null>(null); const flightImage = ref<HTMLImageElement | null>(null);
+let arrival: Animation | null = null;
+function cancelArrival() { arrival?.cancel(); arrival = null; flight.value = null; }
+function animateResult(resultId: string, source: DOMRect) {
+  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches || specialMode.value) return;
+  const current = version;
+  /* 等编辑画面绘制完成，以对话缩略图和画板的真实坐标做移动缩放；切换时取消过渡。 */
+  return nextTick().then(() => painting).then(() => {
+    if (current !== version || resultId !== selectedId.value || !container.value || !area.value) return;
+    const target = container.value.getBoundingClientRect(); const bounds = area.value.getBoundingClientRect();
+    if (!target.width || !target.height) return;
+    cancelArrival();
+    flight.value = { resultId, left: target.left - bounds.left, top: target.top - bounds.top, width: target.width, height: target.height, ready: false };
+    const preview = flight.value;
+    return nextTick().then(() => {
+      const image = flightImage.value; if (!image) return;
+      return image.decode().then(() => {
+        if (current !== version || resultId !== selectedId.value || flight.value !== preview) return;
+        flight.value.ready = true;
+        const animation = image.animate([
+          { transform: `translate(${source.left - target.left}px, ${source.top - target.top}px) scale(${source.width / target.width}, ${source.height / target.height})`, borderRadius: '8px' },
+          { transform: 'translate(0, 0) scale(1, 1)', borderRadius: '0px' }
+        ], { duration: 620, easing: 'cubic-bezier(.22, 1, .36, 1)', fill: 'both' });
+        arrival = animation;
+        return animation.finished.catch(() => {}).finally(() => { if (arrival === animation) { arrival = null; flight.value = null; } });
+      });
+    });
+  }).catch(() => { if (current === version) cancelArrival(); });
+}
+/* 画布铺满窗口，自动定位避开悬浮对话和属性面板，手动平移仍可经过它们后方。 */
+const viewport = computed(() => {
+  const left = area.value ? parseFloat(getComputedStyle(area.value).getPropertyValue('--conversation-width')) + 30 : 0;
+  return { left, width: Math.max(120, areaSize.value.width - left - (panel.value ? 250 : 20)), height: Math.max(160, areaSize.value.height - 220) };
+});
 const actionPosition = computed(() => {
   const x = offset.value.x + (board.value?.x ?? 0) * zoom.value; const y = offset.value.y + (board.value?.y ?? 0) * zoom.value;
-  const width = Math.min(580, Math.max(0, areaSize.value.width - 24)); const center = x + (editor.content?.width ?? selected.value?.width ?? 0) * zoom.value / 2;
-  return { left: `${Math.max(width / 2 + 12, Math.min(areaSize.value.width - width / 2 - 12, center)) - x}px`, top: `${Math.max(8, Math.min(areaSize.value.height - 80, y - 65)) - y}px`, bottom: 'auto', maxWidth: `${width}px` };
+  const width = Math.min(580, viewport.value.width); const center = x + (editor.content?.width ?? selected.value?.width ?? 0) * zoom.value / 2;
+  return { left: `${Math.max(viewport.value.left + width / 2, Math.min(viewport.value.left + viewport.value.width - width / 2, center)) - x}px`, top: `${Math.max(78, Math.min(areaSize.value.height - 160, y - 65)) - y}px`, bottom: 'auto', maxWidth: `${width}px` };
 });
 let canvas: ProductCanvas | null = null; let observer: ResizeObserver | null = null; let version = 0; let resultVersion = 0;
 const streams = new Map<string, EventSource>();
@@ -64,7 +107,7 @@ function paint() {
   const result = selected.value; if (!canvas || !area.value || !result) return;
   const content = editing.value && editor.content ? editor.content : { name: result.name, width: result.width, height: result.height, background: '#ffffff', layers: [{ id: result.id, type: 'image' as const, name: result.name, resultId: result.id, x: 0, y: 0, width: result.width, height: result.height, rotation: 0, opacity: 1, visible: true, locked: true }] };
   try { validateEditorContent(content); } catch (reason) { error.value = (reason as Error).message; return; }
-  const scale = specialMode.value ? Math.min((area.value.clientWidth - 80) / (toolSettings.value === 'expand' ? expandBox.value.width : content.width), (area.value.clientHeight - (maskMode.value ? 260 : 170)) / (toolSettings.value === 'expand' ? expandBox.value.height : content.height), 1) : zoom.value;
+  const scale = specialMode.value ? Math.min((viewport.value.width - 40) / (toolSettings.value === 'expand' ? expandBox.value.width : content.width), (area.value.clientHeight - (maskMode.value ? 300 : 240)) / (toolSettings.value === 'expand' ? expandBox.value.height : content.height), 1) : zoom.value;
   canvasScale.value = Math.max(.03, scale); boardSizes.value[result.id] = { width: content.width, height: content.height }; renderError = '';
   painting = canvas.render(content, area.value.clientWidth, area.value.clientHeight, Math.max(.03, scale), !hand.value && !cropping.value && !drawing.value && !drawingShape.value && !placingText.value && !maskMode.value && !toolSettings.value)
     .then(() => { if (editing.value && !hand.value && !cropping.value && !drawing.value && !drawingShape.value && !placingText.value && !maskMode.value && !toolSettings.value) canvas?.select(editor.selected); }).catch((reason: Error) => { renderError = reason.message; error.value = reason.message; });
@@ -76,8 +119,8 @@ function fit(all = false) {
   const left = Math.min(...targets.map(item => item.x)); const top = Math.min(...targets.map(item => item.y));
   const right = Math.max(...targets.map(item => item.x + (boardSizes.value[item.resultId]?.width ?? results.value.find(result => result.id === item.resultId)!.width)));
   const bottom = Math.max(...targets.map(item => item.y + (boardSizes.value[item.resultId]?.height ?? results.value.find(result => result.id === item.resultId)!.height)));
-  zoom.value = Math.max(.03, Math.min(1, (area.value.clientWidth - 100) / (right - left), (area.value.clientHeight - 140) / (bottom - top)));
-  offset.value = { x: (area.value.clientWidth - (right - left) * zoom.value) / 2 - left * zoom.value, y: (area.value.clientHeight - (bottom - top) * zoom.value) / 2 - top * zoom.value + 20 };
+  zoom.value = Math.max(.03, Math.min(1, (viewport.value.width - 60) / (right - left), viewport.value.height / (bottom - top)));
+  offset.value = { x: viewport.value.left + (viewport.value.width - (right - left) * zoom.value) / 2 - left * zoom.value, y: 90 + (viewport.value.height - (bottom - top) * zoom.value) / 2 - top * zoom.value };
 }
 function saveScene(): Promise<void> {
   if (sceneTimer) { clearTimeout(sceneTimer); sceneTimer = null; }
@@ -91,8 +134,9 @@ function saveScene(): Promise<void> {
 }
 function scheduleScene() { if (!sceneReady.value || specialMode.value) return; ++sceneChanges; if (sceneTimer) clearTimeout(sceneTimer); sceneTimer = setTimeout(() => { saveScene().catch(() => {}); }, 500); }
 function select(id: string, focus = true) {
-  if (cropping.value || drawing.value || drawingShape.value || placingText.value || maskMode.value || toolSubmitting.value || toolSettings.value) return;
-  if (id === selectedId.value) { overview.value = false; return; }
+  if (cropping.value || drawing.value || drawingShape.value || placingText.value || maskMode.value || toolSubmitting.value || toolSettings.value || refinement.value) return;
+  cancelArrival();
+  if (id === selectedId.value) { overview.value = false; if (focus) fit(); return Promise.resolve(); }
   /* 切换作品前保存当前编辑文档；保存失败留在原作品，避免刷新或切换丢失修改。 */
   const current = version;
   return editor.save().then(() => {
@@ -140,8 +184,11 @@ function applyMask(mask: Blob, prompt: string) {
   else submitTool({ operation: 'edit', mask, prompt });
 }
 function changeTool(task: ImageToolTask, operation: 'cancel' | 'retry') {
+  const current = version;
   request<ImageToolTask>(`/image-tools/tasks/${task.id}/${operation}`, { method: 'POST' }).then(update => {
-    if (operation === 'retry') { toolTasks.value.unshift(update); subscribeTool(update, version); }
+    if (current !== version) return;
+    /* 重试进度可能先于响应到达，保留已收到的最新状态，避免插入重复任务。 */
+    if (operation === 'retry') { if (!toolTasks.value.some(value => value.id === update.id)) toolTasks.value.unshift(update); subscribeTool(update, current); }
     else { const index = toolTasks.value.findIndex(item => item.id === update.id); if (index >= 0) toolTasks.value[index] = update; }
   }).catch((reason: Error) => { error.value = reason.message; });
 }
@@ -187,6 +234,24 @@ function insertAsset(asset: ProductAsset) {
   const content = editor.content; if (!content || content.layers.length >= 50) return;
   const id = crypto.randomUUID(); const scale = Math.min(content.width * .6 / asset.width, content.height * .6 / asset.height, 1); const width = asset.width * scale; const height = asset.height * scale;
   content.layers.push({ id, type: 'asset-image', name: asset.name, assetId: asset.id, x: (content.width - width) / 2, y: (content.height - height) / 2, width, height, rotation: 0, opacity: 1, visible: true, locked: false }); editor.selected = id; picked.value = true; panel.value = true; libraryOpen.value = false; editor.commit();
+}
+function applyRefinement(image: Blob) {
+  const target = refinement.value; const content = editor.content; const current = version;
+  if (!target || !content || refining.value) return;
+  refining.value = true; refinementError.value = '';
+  const form = new FormData(); form.append('file', image, 'refined-cutout.png'); form.append('name', '修整抠图');
+  /* 上传独立素材后替换当前图层来源，保留变换和原素材引用；保存成功才关闭，画板撤销可恢复旧来源。 */
+  request<ProductAsset>('/assets', { method: 'POST', body: form }).then(asset => {
+    if (current !== version || content !== editor.content || refinement.value !== target) return;
+    const index = content.layers.findIndex(layer => layer.id === target.layerId); const layer = content.layers[index];
+    if (!layer || layer.locked || layer.type !== 'image' && layer.type !== 'asset-image') throw new Error('当前图层已改变，请关闭后重新修整。');
+    if (layer.type === 'image') {
+      const { resultId, ...values } = layer;
+      if (target.imageUrl !== `/api/product-image/results/${resultId}/file`) throw new Error('当前图片已改变，请关闭后重新修整。');
+      content.layers[index] = { ...values, type: 'asset-image', assetId: asset.id, matteSourceAssetId: target.sourceAssetId };
+    } else content.layers[index] = { ...layer, assetId: asset.id, matteSourceAssetId: target.sourceAssetId };
+    editor.commit(); return editor.save().then(() => { if (current === version) { refinement.value = null; picked.value = true; area.value?.focus(); } });
+  }).catch((reason: Error) => { if (current === version) refinementError.value = reason.message; }).finally(() => { refining.value = false; });
 }
 function applyTemplate(value: 'clean' | 'banner' | 'features' | 'specification') {
   const content = editor.content; if (!content) return;
@@ -240,10 +305,10 @@ function duplicate() {
   const layer = { ...editor.layer, id: crypto.randomUUID(), name: `${editor.layer.name} 副本`, x: editor.layer.x + 20, y: editor.layer.y + 20 };
   editor.content.layers.push(layer); editor.selected = layer.id; editor.commit();
 }
-function download(format: 'png' | 'jpeg', scale: number, name: string) {
+function download(format: 'png' | 'jpeg', scale: number, name: string, quality: number) {
   if (!canvas || exporting.value || !selected.value) return;
   exporting.value = true; error.value = '';
-  painting.then(() => { if (renderError) throw new Error(renderError); return canvas!.export(format, scale); }).then(blob => {
+  painting.then(() => { if (renderError) throw new Error(renderError); return canvas!.export(format, scale, quality); }).then(blob => {
     const url = URL.createObjectURL(blob); const link = document.createElement('a'); link.href = url; link.download = `${name}.${format === 'jpeg' ? 'jpg' : 'png'}`; link.click(); exportOptions.value = false; setTimeout(() => URL.revokeObjectURL(url), 1000);
   }).catch((reason: Error) => { error.value = reason.message; }).finally(() => { exporting.value = false; });
 }
@@ -251,7 +316,7 @@ function reference(modifying = false) {
   const result = selected.value; if (!result || referencing.value) return;
   const current = version; referencing.value = true; error.value = '';
   /* 将选中结果通过已有素材接口加入下一轮；复用 sourceAssetId，不增加隐含的图片关联字段。 */
-  const image = editing.value ? painting.then(() => { if (renderError) throw new Error(renderError); return canvas!.export(); }) : fetch(`/api/product-image/results/${result.id}/file`).then(response => { if (!response.ok) throw new Error('当前作品无法读取。'); return response.blob(); });
+  const image = editing.value ? painting.then(() => { if (renderError) throw new Error(renderError); return canvas!.export(); }) : fetch(`/api/editor/results/${result.id}/file`).then(response => { if (!response.ok) throw new Error('当前作品无法读取。'); return response.blob(); });
   image.then(blob => {
     if (current !== version) return;
     const form = new FormData(); form.append('file', blob, result.name); form.append('name', result.name);
@@ -259,6 +324,7 @@ function reference(modifying = false) {
   }).then(asset => { if (current === version && asset) emit('reference', asset, modifying); }).catch((reason: Error) => { if (current === version) error.value = reason.message; }).finally(() => { referencing.value = false; });
 }
 function keyboard(event: KeyboardEvent) {
+  if (refinement.value) { if (event.key === 'Escape' && !refining.value) { refinement.value = null; area.value?.focus(); } return; }
   if (exportOptions.value) { if (event.key === 'Escape' && !exporting.value) exportOptions.value = false; return; }
   if (event.key === 'Escape') libraryOpen.value = false;
   if (event.key === 'Escape') drawingShape.value = null;
@@ -284,7 +350,7 @@ function wheel(event: WheelEvent) {
   if (event.ctrlKey || event.metaKey) { event.preventDefault(); const bounds = area.value!.getBoundingClientRect(); setZoom(zoom.value * (event.deltaY > 0 ? .9 : 1.1), { x: event.clientX - bounds.left, y: event.clientY - bounds.top }); }
   else { event.preventDefault(); offset.value = { x: offset.value.x - event.deltaX, y: offset.value.y - event.deltaY }; }
 }
-function setZoom(value: number, point = { x: (area.value?.clientWidth ?? 0) / 2, y: (area.value?.clientHeight ?? 0) / 2 }) {
+function setZoom(value: number, point = { x: viewport.value.left + viewport.value.width / 2, y: (area.value?.clientHeight ?? 0) / 2 }) {
   const next = Math.max(.03, Math.min(3, value)); const ratio = next / zoom.value; offset.value = { x: point.x - (point.x - offset.value.x) * ratio, y: point.y - (point.y - offset.value.y) * ratio }; zoom.value = next;
 }
 function beforeUnload(event: BeforeUnloadEvent) { if (editor.dirty || sceneChanges !== savedSceneChanges) { event.preventDefault(); event.returnValue = ''; } }
@@ -323,7 +389,7 @@ function addExecution(execution: AgentExecution) {
   if (index === -1) executions.value.unshift(execution); else executions.value[index] = execution;
   subscribe(execution, version); readResults(version).catch((reason: Error) => { error.value = reason.message; });
 }
-defineExpose({ addExecution, select });
+defineExpose({ addExecution, select, animateResult });
 function readResults(current: number) {
   const revision = ++resultVersion;
   /* 只读取本会话执行步骤实际引用的结果，套图过滤旧重试图片；切换会话后丢弃未完成请求。 */
@@ -338,7 +404,7 @@ function readResults(current: number) {
       for (const result of results.value) if (!boards.value.some(item => item.resultId === result.id)) { const right = Math.max(0, ...boards.value.map(item => item.x + (boardSizes.value[item.resultId]?.width ?? results.value.find(value => value.id === item.resultId)!.width) + 160)); boards.value.push({ resultId: result.id, x: right, y: 0 }); }
       const added = results.value.filter(result => !existing.has(result.id)).sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
       if (!existing.size && selectedId.value && results.value.some(result => result.id === selectedId.value)) { const id = selectedId.value; selectedId.value = ''; select(id, false); }
-      else if (added && (!selected.value || added.createdAt > selected.value.createdAt)) select(added.id);
+      else if (added && (!selected.value || added.createdAt > selected.value.createdAt)) return select(added.id)?.then(() => { if (current === version && !loading.value && selectedId.value === added.id) emit('reveal', added.id); });
       else if (!results.value.some(result => result.id === selectedId.value)) {
         if (results.value[0]) select(results.value[0].id);
         else { selectedId.value = ''; editing.value = false; panel.value = false; }
@@ -346,6 +412,8 @@ function readResults(current: number) {
     });
 }
 function load() {
+  refinement.value = null; refinementError.value = '';
+  cancelArrival();
   const current = ++version; ++resultVersion; for (const stream of streams.values()) stream.close(); streams.clear();
   sceneSession = props.sessionId; sceneReady.value = false; if (sceneTimer) clearTimeout(sceneTimer); sceneTimer = null; sceneChanges = 0; savedSceneChanges = 0; sceneError.value = ''; boards.value = []; boardSizes.value = {}; placingText.value = false; editingText.value = false; drawingShape.value = null;
   executions.value = []; toolTasks.value = []; maskMode.value = null; toolSettings.value = null; results.value = []; selectedId.value = ''; editing.value = false; panel.value = false; cropping.value = false; drawing.value = false; tools.value = false; shapeMenu.value = false; picked.value = false; error.value = ''; loading.value = true;
@@ -369,31 +437,35 @@ onUnmounted(() => window.removeEventListener('keyup', releaseSpace));
 watch(() => editor.selected, id => { if (editing.value) canvas?.select(id); });
 watch(() => editor.selected, id => { picked.value = !!id; });
 watch([boards, offset, zoom], scheduleScene, { deep: true });
+watch([offset, zoom, panel, specialMode], cancelArrival, { deep: true });
 onMounted(() => { canvas = new ProductCanvas(container.value!, id => { if (editing.value && !hand.value && !cropping.value) { editor.selected = id; picked.value = !!id; tools.value = false; } }, (id, values) => editor.updateLayer(id, values)); observer = new ResizeObserver(() => { areaSize.value = { width: area.value!.clientWidth, height: area.value!.clientHeight }; paint(); }); observer.observe(area.value!); paint(); window.addEventListener('keydown', keyboard); window.addEventListener('beforeunload', beforeUnload); });
 onBeforeRouteLeave(() => editor.save().then(saveScene).then(() => true).catch(() => false));
 onBeforeRouteUpdate(() => editor.save().then(saveScene).then(() => true).catch(() => false));
+onUnmounted(cancelArrival);
 onUnmounted(() => { saveScene().catch(() => {}); ++version; if (sceneTimer) clearTimeout(sceneTimer); for (const stream of streams.values()) stream.close(); observer?.disconnect(); canvas?.destroy(); editor.close(); window.removeEventListener('keydown', keyboard); window.removeEventListener('beforeunload', beforeUnload); });
 </script>
 
 <template>
   <section class="agent-canvas" aria-label="作品画板">
+    <CutoutRefinement v-if="refinement" :source-url="`/api/assets/${refinement.sourceAssetId}/file`" :image-url="refinement.imageUrl" :busy="refining" :failure="refinementError" @close="refinement = null; area?.focus()" @apply="applyRefinement" />
     <header><div><h2>作品画板</h2><span>{{ editing ? saveStatus : results.length ? `${results.length} 张作品 · 已自动保存到项目` : '生成作品会展示在这里' }}</span></div><button type="button" :disabled="loading || editor.dirty || editor.saving || cropping || !!maskMode || toolSubmitting || !!toolSettings" aria-label="刷新作品" title="刷新作品" @click="load"><RefreshCw :size="15" /></button><button v-if="selected" class="button" :disabled="exporting || editor.loading || cropping || !!maskMode || toolSubmitting || !!toolSettings" @click="exportOptions = true"><Download :size="14" /> {{ exporting ? '导出中…' : '下载作品' }}</button></header>
     <CanvasExport v-if="exportOptions && selected" :width="editor.content?.width ?? selected.width" :height="editor.content?.height ?? selected.height" :name="editor.content?.name ?? selected.name" :busy="exporting" @close="exportOptions = false" @download="download" />
     <p v-if="error" class="canvas-notice" role="alert">{{ error }}</p>
     <p v-if="sceneError" class="canvas-notice" role="alert">{{ sceneError }}<button type="button" @click="saveScene().catch(() => {})">重试保存布局</button></p>
     <div class="canvas-body">
     <div ref="area" class="canvas-area" :class="{ hand, dragging }" tabindex="0" aria-label="画板操作区域" @click.self="picked = false; tools = false; editor.selected = null" @wheel="wheel" @pointerdown="pan" @pointermove="move" @pointerup="release" @pointercancel="release" @lostpointercapture="release">
+      <img v-if="flight" ref="flightImage" class="result-flight" :class="{ ready: flight.ready }" :src="`/api/editor/results/${flight.resultId}/file`" alt="" aria-hidden="true" :style="{ left: `${flight.left}px`, top: `${flight.top}px`, width: `${flight.width}px`, height: `${flight.height}px` }" />
       <p v-if="placingText || drawingShape" class="placement-hint">{{ placingText ? '点击作品放置文字' : `在作品上拖动绘制${shapeNames[drawingShape!]}` }} · Esc 取消</p>
-      <CanvasLibrary v-if="libraryOpen && !specialMode" :results="results" @close="libraryOpen = false" @template="applyTemplate" @asset="insertAsset" @result="imageId = $event; addImage(); libraryOpen = false" @shape="drawingShape = $event; libraryOpen = false; drawing = false; placingText = false; hand = false; picked = false; panel = false" />
-      <template v-if="!specialMode"><div v-for="item in boards.filter(item => item.resultId !== selectedId)" :key="item.resultId" class="canvas-board" :style="{ transform: `translate(${offset.x + item.x * zoom}px, ${offset.y + item.y * zoom}px)` }" @click="select(item.resultId, false)"><button type="button" class="board-title" :aria-label="`移动画板 ${results.find(result => result.id === item.resultId)?.name}`" @pointerdown="startBoard($event, item.resultId)">{{ results.find(result => result.id === item.resultId)?.name }}</button><CanvasBoardPreview :result-id="item.resultId" :zoom="zoom" @size="boardSizes[item.resultId] = $event" /></div></template>
-      <div v-show="selected" class="canvas-content" :style="specialMode ? { left: '50%', top: '50%', transform: `translate(${-((toolSettings === 'expand' ? expandBox.x + expandBox.width / 2 : (editor.content?.width ?? 0) / 2) * canvasScale)}px, ${-((toolSettings === 'expand' ? expandBox.y + expandBox.height / 2 : (editor.content?.height ?? 0) / 2) * canvasScale) - (maskMode ? 80 : 45)}px)` } : { left: '0', top: '0', transform: `translate(${offset.x + (board?.x ?? 0) * zoom}px, ${offset.y + (board?.y ?? 0) * zoom}px)` }">
+      <CanvasLibrary v-if="libraryOpen && !specialMode" :results="results" :style="{ left: `${viewport.left}px`, width: `${Math.min(580, viewport.width)}px` }" @close="libraryOpen = false" @template="applyTemplate" @asset="insertAsset" @result="imageId = $event; addImage(); libraryOpen = false" @shape="drawingShape = $event; libraryOpen = false; drawing = false; placingText = false; hand = false; picked = false; panel = false" />
+      <template v-if="!specialMode && !loading"><div v-for="item in boards.filter(item => item.resultId !== selectedId)" :key="item.resultId" class="canvas-board" :style="{ transform: `translate(${offset.x + item.x * zoom}px, ${offset.y + item.y * zoom}px)` }" @click="select(item.resultId, false)"><button type="button" class="board-title" :aria-label="`移动画板 ${results.find(result => result.id === item.resultId)?.name}`" @pointerdown="startBoard($event, item.resultId)">{{ results.find(result => result.id === item.resultId)?.name }}</button><CanvasBoardPreview :result-id="item.resultId" :zoom="zoom" @size="boardSizes[item.resultId] = $event" /></div></template>
+      <div v-show="selected" class="canvas-content" :class="{ arriving: flight?.ready }" :style="specialMode ? { left: `${viewport.left + viewport.width / 2}px`, top: '50%', transform: `translate(${-((toolSettings === 'expand' ? expandBox.x + expandBox.width / 2 : (editor.content?.width ?? 0) / 2) * canvasScale)}px, ${-((toolSettings === 'expand' ? expandBox.y + expandBox.height / 2 : (editor.content?.height ?? 0) / 2) * canvasScale) - (maskMode ? 80 : 45)}px)` } : { left: '0', top: '0', transform: `translate(${offset.x + (board?.x ?? 0) * zoom}px, ${offset.y + (board?.y ?? 0) * zoom}px)` }">
         <button v-if="selected && !specialMode" type="button" class="board-title" :aria-label="`移动画板 ${selected.name}`" @pointerdown="startBoard($event, selected.id)">{{ editing && editor.content ? editor.content.name : selected.name }} · {{ editing && editor.content ? editor.content.width : selected.width }} × {{ editing && editor.content ? editor.content.height : selected.height }}</button>
         <div v-if="picked && !hand && !cropping && !drawing && !drawingShape && !placingText && !maskMode && !toolSettings" class="selected-actions" :style="actionPosition" role="toolbar" aria-label="当前作品操作" @pointerdown.stop>
           <template v-if="editor.layer?.type === 'image' || editor.layer?.type === 'asset-image'">
             <button type="button" :disabled="toolSubmitting || !!activeTool" @click="openTool('split-layers')"><Layers3 :size="14" /> 拆分图层</button>
             <div class="tool-menu"><button type="button" :aria-expanded="textMenu" :disabled="toolSubmitting || !!activeTool" @click="textMenu = !textMenu; tools = false"><Type :size="14" /> 编辑文字</button><div v-if="textMenu" role="menu"><button type="button" role="menuitem" @click="openTool('recognize-text')">直接编辑</button><button type="button" role="menuitem" @click="openTool('replace-text')">无痕改字</button><button type="button" role="menuitem" @click="textMenu = false; edit(true)">添加文字</button></div></div>
             <button type="button" :disabled="toolSubmitting || !!activeTool" @click="openTool('edit')"><Sparkles :size="14" /> AI 改图</button><button type="button" :disabled="toolSubmitting || !!activeTool" @click="openTool('upscale')">AI 超清</button>
-            <div class="tool-menu"><button type="button" :aria-expanded="tools" :disabled="toolSubmitting || !!activeTool" @click="tools = !tools; textMenu = false"><Crop :size="14" /> 工具</button><div v-if="tools" role="menu"><button type="button" role="menuitem" @click="crop">调整尺寸</button><button type="button" role="menuitem" @click="openTool('erase')">AI 无痕消除</button><button type="button" role="menuitem" @click="openTool('cutout')">抠图</button><button type="button" role="menuitem" @click="openTool('expand')">AI 扩图</button><button type="button" role="menuitem" :disabled="referencing" @click="tools = false; reference(false)">引用图片</button></div></div>
+            <div class="tool-menu"><button type="button" :aria-expanded="tools" :disabled="toolSubmitting" @click="tools = !tools; textMenu = false"><Crop :size="14" /> 工具</button><div v-if="tools" role="menu"><button type="button" role="menuitem" @click="crop">调整尺寸</button><button type="button" role="menuitem" :disabled="toolSubmitting || !!activeTool" @click="openTool('erase')">AI 无痕消除</button><button type="button" role="menuitem" :disabled="toolSubmitting || !!activeTool" @click="openTool('cutout')">抠图</button><button v-if="refinable" type="button" role="menuitem" :disabled="refining || editor.layer?.locked" @click="refinement = refinable; refinementError = ''; tools = false">修整抠图</button><button type="button" role="menuitem" :disabled="toolSubmitting || !!activeTool" @click="openTool('expand')">AI 扩图</button><button type="button" role="menuitem" :disabled="referencing" @click="tools = false; reference(false)">引用图片</button></div></div>
           </template>
           <CanvasTextTools v-else-if="editor.layer?.type === 'text'" @edit="editingText = true" />
           <template v-else><button type="button" :disabled="!editor.layer || editor.layer.locked" @click="duplicate"><Copy :size="14" /> 复制</button><button type="button" :disabled="!editor.layer || editor.layer.locked" @click="removeLayer"><Trash2 :size="14" /> 删除</button></template>
@@ -408,7 +480,7 @@ onUnmounted(() => { saveScene().catch(() => {}); ++version; if (sceneTimer) clea
         <CanvasMask v-if="maskMode && editor.content" :width="editor.content.width" :height="editor.content.height" :mode="maskMode" :busy="toolSubmitting" @cancel="maskMode = null; picked = true; fit()" @apply="applyMask" />
         <CanvasCrop v-if="toolSettings === 'expand' && editor.content" :width="editor.content.width" :height="editor.content.height" expanding :busy="toolSubmitting" @resize="expandBox = $event; paint()" @cancel="toolSettings = null; picked = true; fit()" @apply="submitTool({ operation: 'expand', width: $event.width, height: $event.height, x: -$event.x, y: -$event.y, prompt: '' })" />
       </div>
-      <div v-if="overview" class="canvas-overview" aria-label="全部作品"><header><strong>全部作品 · {{ results.length }} 张</strong><button type="button" aria-label="关闭作品总览" @click="overview = false"><X :size="14" /></button></header><div><button v-for="result in results" :key="result.id" type="button" :aria-label="`选择作品 ${result.name}`" @click="select(result.id)"><img :src="`/api/product-image/results/${result.id}/file`" :alt="result.name" /><span>{{ result.name }}</span></button></div></div>
+      <div v-if="overview" class="canvas-overview" aria-label="全部作品"><header><strong>全部作品 · {{ results.length }} 张</strong><button type="button" aria-label="关闭作品总览" @click="overview = false"><X :size="14" /></button></header><div><button v-for="result in results" :key="result.id" type="button" :aria-label="`选择作品 ${result.name}`" @click="select(result.id)"><img :src="`/api/editor/results/${result.id}/file`" :alt="result.name" /><span>{{ result.name }}</span></button></div></div>
       <div v-if="!selected" class="canvas-empty"><Image :size="38" :stroke-width="1" /><h3>{{ loading ? '正在读取作品…' : activeExecution ? '正在制作你的作品' : '从一个想法，开始创作' }}</h3><p v-if="activeExecution">生成与检查完成后，作品会出现在这里。<br />可以在左侧查看进度或停止当前任务。</p><p v-else>在左侧描述需求，确认方案后开始生成。<br />作品会进入画板，支持继续创作、编辑和下载。</p></div>
     </div>
     <aside v-if="panel && selected" class="canvas-panel" aria-label="画板图层与属性">
@@ -433,38 +505,41 @@ onUnmounted(() => { saveScene().catch(() => {}); ++version; if (sceneTimer) clea
       <div v-if="drawing" class="brush-controls"><label>颜色<input v-model="brushColor" type="color" aria-label="画笔颜色" /></label><label>大小<input v-model.number="brushSize" type="range" min="1" max="100" aria-label="画笔大小" />{{ brushSize }}</label></div>
     </div>
     <p v-if="help" class="canvas-help">V 选择 · H 抓手 · 滚轮平移 · Ctrl + 滚轮缩放 · 0 适应窗口<br />左右方向键切换作品；文字和图片可拖动、缩放、旋转。修改自动保存，下载包含当前编辑内容。</p>
-    <footer><div class="canvas-results"><button v-for="result in results" :key="result.id" type="button" :class="{ selected: result.id === selectedId }" :aria-pressed="result.id === selectedId" :aria-label="`查看 ${result.name}`" @click="select(result.id)"><img :src="`/api/product-image/results/${result.id}/file`" :alt="result.name" /></button></div><div class="canvas-navigation"><button type="button" :disabled="selectedIndex <= 0" aria-label="上一张作品" @click="select(results[selectedIndex - 1].id)"><ChevronLeft :size="14" /></button><span>{{ selectedIndex + 1 }} / {{ results.length }}</span><button type="button" :disabled="selectedIndex < 0 || selectedIndex >= results.length - 1" aria-label="下一张作品" @click="select(results[selectedIndex + 1].id)"><ChevronRight :size="14" /></button><button type="button" :disabled="!results.length" :aria-pressed="overview" aria-label="全部作品" title="全部作品" @click="overview = !overview"><Grid2X2 :size="15" /></button></div><div class="canvas-zoom"><button type="button" :disabled="!selected || zoom <= .03" aria-label="缩小画板" @click="setZoom(zoom / 1.25)"><Minus :size="15" /></button><label><input :value="Math.round(zoom * 100)" type="number" min="3" max="300" aria-label="画板缩放百分比" :disabled="!selected" @change="setZoom(Number(($event.target as HTMLInputElement).value) / 100 || 1)" />%</label><button type="button" :disabled="!selected || zoom >= 3" aria-label="放大画板" @click="setZoom(zoom * 1.25)"><Plus :size="15" /></button><button type="button" :disabled="!selected" aria-label="适应画板" title="适应画板 0" @click="fit()"><Expand :size="15" /></button><button type="button" :disabled="!selected" aria-label="查看全部画板" title="查看全部画板" @click="fit(true)"><Grid2X2 :size="15" /></button></div></footer>
+    <footer><div class="canvas-results"><button v-for="result in results" :key="result.id" type="button" :class="{ selected: result.id === selectedId }" :aria-pressed="result.id === selectedId" :aria-label="`查看 ${result.name}`" @click="select(result.id)"><img :src="`/api/editor/results/${result.id}/file`" :alt="result.name" /></button></div><div class="canvas-navigation"><button type="button" :disabled="selectedIndex <= 0" aria-label="上一张作品" @click="select(results[selectedIndex - 1].id)"><ChevronLeft :size="14" /></button><span>{{ selectedIndex + 1 }} / {{ results.length }}</span><button type="button" :disabled="selectedIndex < 0 || selectedIndex >= results.length - 1" aria-label="下一张作品" @click="select(results[selectedIndex + 1].id)"><ChevronRight :size="14" /></button><button type="button" :disabled="!results.length" :aria-pressed="overview" aria-label="全部作品" title="全部作品" @click="overview = !overview"><Grid2X2 :size="15" /></button></div><div class="canvas-zoom"><button type="button" :disabled="!selected || zoom <= .03" aria-label="缩小画板" @click="setZoom(zoom / 1.25)"><Minus :size="15" /></button><label><input :value="Math.round(zoom * 100)" type="number" min="3" max="300" aria-label="画板缩放百分比" :disabled="!selected" @change="setZoom(Number(($event.target as HTMLInputElement).value) / 100 || 1)" />%</label><button type="button" :disabled="!selected || zoom >= 3" aria-label="放大画板" @click="setZoom(zoom * 1.25)"><Plus :size="15" /></button><button type="button" :disabled="!selected" aria-label="适应画板" title="适应画板 0" @click="fit()"><Expand :size="15" /></button><button type="button" :disabled="!selected" aria-label="查看全部画板" title="查看全部画板" @click="fit(true)"><Grid2X2 :size="15" /></button></div></footer>
   </section>
 </template>
 
 <style scoped lang="scss">
-.agent-canvas { position: relative; min-width: 0; display: flex; flex-direction: column; overflow: hidden; background: #f0f2f5; > header { display: flex; align-items: center; gap: 10px; padding: 14px 18px; background: var(--surface); border-bottom: 1px solid var(--border); } header > div { flex: 1; min-width: 0; } h2 { font-size: 13px; font-weight: 600; } header span { font-size: 11px; color: var(--muted); } button { display: inline-flex; align-items: center; justify-content: center; border: 0; background: transparent; padding: 7px; border-radius: 6px; } .button { padding: 8px 10px; font-size: 11px; background: var(--text); color: white; } .button.secondary { background: var(--surface); color: var(--text); } > footer { display: flex; align-items: center; gap: 12px; padding: 10px 14px; min-height: 62px; background: var(--surface); border-top: 1px solid var(--border); } }
-.canvas-area { flex: 1; min-width: 0; min-height: 0; display: grid; place-items: center; overflow: clip; position: relative; background-image: radial-gradient(#d8dce3 1px, transparent 1px); background-size: 18px 18px; &.hand { cursor: grab; touch-action: none; } &.dragging { cursor: grabbing; } }
-.canvas-content, .canvas-board { position: absolute; left: 0; top: 0; background: repeating-conic-gradient(#e6e9ef 0% 25%, #ffffff 0% 50%) 0 / 16px 16px; box-shadow: 0 4px 24px rgb(0 0 0 / 8%); outline: 1px solid #8b9cbb; }
+.agent-canvas { position: relative; min-width: 0; display: flex; flex-direction: column; overflow: hidden; background: #f5f6fa; > header { position: absolute; z-index: 2; top: 10px; right: 10px; max-width: calc(100% - var(--conversation-width) - 40px); display: flex; align-items: center; gap: 14px; padding: 10px 14px; background: var(--surface); border: 1px solid var(--border); border-radius: 18px; box-shadow: var(--shadow); } header > div { flex: 1; min-width: 0; } h2 { font-size: 13px; font-weight: 500; line-height: 19.2px; } header span { font-size: 12px; line-height: 16px; color: var(--muted); } button { display: inline-flex; align-items: center; justify-content: center; border: 0; background: transparent; color: var(--text-secondary); padding: 7px; border-radius: 6px; &:hover:not(:disabled) { background: var(--nav-hover); color: var(--accent); } } .button { padding: 8px 10px; font-size: 12px; line-height: 17.6px; font-weight: 500; background: var(--text); color: white; &:hover:not(:disabled) { background: #3d4050; color: white; box-shadow: 0 3px 10px rgb(35 40 60 / 12%); } } .button.secondary { background: var(--surface); color: var(--text); &:hover:not(:disabled) { background: var(--nav-hover); color: var(--accent); box-shadow: none; } } > footer { position: absolute; z-index: 2; bottom: 10px; left: calc(var(--conversation-width) + 30px); right: 16px; display: flex; align-items: center; gap: 12px; padding: 8px 12px; min-height: 54px; background: var(--surface); border: 1px solid var(--border); border-radius: 16px; box-shadow: var(--shadow); } }
+.canvas-area { flex: 1; min-width: 0; min-height: 0; display: grid; place-items: center; overflow: clip; position: relative; background-color: #f5f6fa; background-image: radial-gradient(#e2e5ec .65px, transparent .65px); background-size: 16px 16px; &.hand { cursor: grab; touch-action: none; } &.dragging { cursor: grabbing; } }
+.canvas-content, .canvas-board { position: absolute; left: 0; top: 0; background: repeating-conic-gradient(#e6e9ef 0% 25%, #ffffff 0% 50%) 0 / 16px 16px; box-shadow: 0 2px 6px rgb(35 40 60 / 4%), 0 10px 24px rgb(35 40 60 / 6%); outline: 1px solid #c4cad8; }
 .canvas-board { cursor: pointer; }
+.canvas-content.arriving { visibility: hidden; }
+.result-flight { position: absolute; z-index: 9; visibility: hidden; object-fit: fill; transform-origin: top left; pointer-events: none; box-shadow: 0 8px 30px rgb(34 30 55 / 12%); &.ready { visibility: visible; } }
 .placement-hint { position: absolute; top: 10px; left: 50%; transform: translateX(-50%); z-index: 4; padding: 7px 10px; border-radius: 6px; background: var(--surface); font-size: 11px; color: var(--muted); pointer-events: none; white-space: nowrap; }
-.board-title { position: absolute; top: -29px; left: 0; max-width: 100%; font-size: 10px; color: var(--muted); cursor: move; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.board-title { position: absolute; top: -29px; left: 0; max-width: 100%; font-size: 12px; line-height: 16px; color: var(--muted); cursor: move; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .canvas-body { display: flex; flex: 1; min-height: 0; }
-.canvas-toolbar { position: relative; align-self: center; display: flex; align-items: center; justify-content: center; gap: 6px; background: var(--surface); padding: 6px; margin: 8px; border: 1px solid var(--border); border-radius: 12px; box-shadow: var(--shadow); button.selected, button[aria-pressed='true'] { background: var(--page); } i { height: 18px; width: 1px; background: var(--border); margin: 0 4px; } }
+.canvas-toolbar { position: absolute; z-index: 2; bottom: 80px; left: calc((100% + var(--conversation-width) + 20px) / 2); transform: translateX(-50%); width: max-content; max-width: calc(100% - var(--conversation-width) - 40px); display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 6px; background: var(--surface); padding: 7px; border: 1px solid var(--border); border-radius: 14px; box-shadow: var(--shadow); button:hover { background: var(--nav-hover); color: var(--accent); } button.selected, button[aria-pressed='true'] { background: var(--accent-soft); color: var(--accent); } i { height: 18px; width: 1px; background: var(--border); margin: 0 4px; } }
 .shape-menu { position: relative; > div { position: absolute; bottom: calc(100% + 10px); left: 0; z-index: 4; display: grid; grid-template-columns: 1fr 1fr; min-width: 160px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 6px; box-shadow: var(--shadow); } }
 .image-upload { position: relative; display: flex; padding: 7px; border-radius: 6px; overflow: hidden; cursor: pointer; input { position: absolute; inset: 0; opacity: 0; width: 100%; cursor: pointer; } &.disabled { opacity: .4; cursor: default; } }
 .brush-controls { position: absolute; bottom: calc(100% + 10px); left: 50%; transform: translateX(-50%); display: flex; gap: 12px; align-items: center; padding: 8px 12px; background: var(--surface); border: 1px solid var(--border); border-radius: 9px; box-shadow: var(--shadow); font-size: 11px; label { display: flex; align-items: center; gap: 6px; white-space: nowrap; } input[type='color'] { width: 24px; height: 24px; padding: 1px; border: 0; } input[type='range'] { width: 80px; } }
-.canvas-panel { flex: 0 0 230px; overflow-y: auto; padding: 12px; background: var(--surface); border-left: 1px solid var(--border); font-size: 11px; header { display: flex; align-items: center; justify-content: space-between; } h3 { font-size: 12px; } ul { list-style: none; padding: 0; margin: 12px 0; display: grid; gap: 6px; } li { display: flex; align-items: center; gap: 2px; border: 1px solid var(--border); border-radius: 6px; padding: 3px; } li.selected { border-color: var(--text-secondary); background: var(--page); } .layer-name { flex: 1; min-width: 0; text-align: left; justify-content: start; overflow-wrap: anywhere; font-size: 11px; } }
-.layer-controls { display: flex; gap: 8px; border-bottom: 1px solid var(--border); padding-bottom: 8px; button { font-size: 11px; gap: 5px; } }
+.canvas-panel { position: absolute; z-index: 5; top: 82px; right: 12px; bottom: 148px; width: 230px; overflow-y: auto; padding: 12px; background: var(--surface); border: 1px solid var(--border); border-radius: 14px; box-shadow: var(--shadow); font-size: 12px; header { display: flex; align-items: center; justify-content: space-between; } h3 { font-size: 13px; font-weight: 500; } ul { list-style: none; padding: 0; margin: 12px 0; display: grid; gap: 6px; } li { display: flex; align-items: center; gap: 2px; border: 1px solid var(--border); border-radius: 6px; padding: 3px; } li.selected { border-color: #c9bde9; background: var(--accent-soft); } .layer-name { flex: 1; min-width: 0; text-align: left; justify-content: start; overflow-wrap: anywhere; font-size: 12px; } }
+.layer-controls { display: flex; gap: 8px; border-bottom: 1px solid var(--border); padding-bottom: 8px; button { font-size: 12px; gap: 5px; } }
 .image-picker { display: grid; gap: 6px; margin-top: 12px; color: var(--muted); select { width: 100%; padding: 6px; border: 1px solid var(--border); border-radius: 5px; font: inherit; background: var(--surface); } button { justify-content: start; gap: 5px; font-size: 11px; } }
-.canvas-navigation { display: flex; align-items: center; gap: 2px; font-size: 10px; color: var(--muted); }
-.canvas-overview { position: absolute; inset: 12px; z-index: 2; overflow-y: auto; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 16px; box-shadow: var(--shadow); cursor: default; header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; font-size: 12px; } > div { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 12px; } button { display: grid; gap: 6px; font-size: 11px; } img { width: 100%; height: 120px; object-fit: contain; background: var(--page); } }
-.canvas-help { padding: 10px 16px; background: var(--surface); font-size: 11px; line-height: 1.8; color: var(--muted); }
-.canvas-empty { margin: auto; text-align: center; color: var(--muted); h3 { color: var(--text-secondary); font-size: 15px; margin: 16px 0 10px; font-weight: 500; } p { font-size: 12px; line-height: 2; } }
-.canvas-results { display: flex; flex: 1; min-width: 0; gap: 8px; overflow-x: auto; button { flex-shrink: 0; padding: 2px; border: 1px solid transparent; } button.selected { border-color: var(--text); } img { display: block; width: 38px; height: 38px; object-fit: cover; border-radius: 3px; } }
-.canvas-zoom { display: flex; align-items: center; gap: 2px; flex-shrink: 0; label { display: flex; align-items: center; font-size: 10px; color: var(--muted); } input { width: 38px; border: 0; background: transparent; text-align: right; font: inherit; appearance: textfield; } input::-webkit-inner-spin-button { appearance: none; } }
-.canvas-progress { display: flex; flex-wrap: wrap; gap: 12px; padding: 8px 16px; background: var(--surface); font-size: 11px; color: var(--muted); a { text-decoration: underline; margin-left: 4px; } }
-.canvas-notice { background: var(--surface); padding: 10px 16px; font-size: 12px; color: var(--error); }
-.selected-actions { position: absolute; bottom: calc(100% + 10px); left: 50%; transform: translateX(-50%); z-index: 4; display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 4px; width: max-content; max-width: min(580px, 58vw); padding: 5px 8px; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; box-shadow: var(--shadow); white-space: nowrap; button { gap: 5px; color: var(--text-secondary); font-size: 11px; } }
+.canvas-navigation { display: flex; align-items: center; gap: 2px; font-size: 12px; line-height: 16px; font-variant-numeric: tabular-nums; color: var(--muted); }
+.canvas-overview { position: absolute; inset: 82px 16px 148px calc(var(--conversation-width) + 30px); z-index: 2; overflow-y: auto; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 16px; box-shadow: var(--shadow); cursor: default; header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; font-size: 12px; } > div { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 12px; } button { display: grid; gap: 6px; font-size: 11px; } img { width: 100%; height: 120px; object-fit: contain; background: var(--page); } }
+.canvas-help { position: absolute; z-index: 3; right: 16px; bottom: 140px; max-width: calc(100% - var(--conversation-width) - 40px); padding: 10px 16px; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; box-shadow: var(--shadow); font-size: 12px; line-height: 1.75; color: var(--text-secondary); }
+.canvas-empty { position: absolute; left: calc(var(--conversation-width) + 30px); right: 20px; top: 45%; transform: translateY(-50%); text-align: center; color: var(--muted); h3 { color: var(--text-secondary); font-size: 15px; margin: 16px 0 10px; font-weight: 500; } p { font-size: 12px; line-height: 2; } }
+.canvas-results { display: flex; flex: 1; min-width: 0; gap: 8px; overflow-x: auto; button { flex-shrink: 0; padding: 2px; border: 1px solid transparent; } button.selected { border-color: #b9abe6; background: var(--accent-soft); } img { display: block; width: 38px; height: 38px; object-fit: cover; border-radius: 3px; } }
+.canvas-zoom { display: flex; align-items: center; gap: 2px; flex-shrink: 0; label { display: flex; align-items: center; font-size: 12px; line-height: 16px; font-variant-numeric: tabular-nums; color: var(--text-secondary); } input { width: 38px; border: 0; background: transparent; color: inherit; text-align: right; font: inherit; appearance: textfield; } input::-webkit-inner-spin-button { appearance: none; } }
+.canvas-progress { position: absolute; top: 84px; left: calc(var(--conversation-width) + 30px); display: flex; flex-wrap: wrap; gap: 12px; padding: 8px 16px; background: var(--surface); border-radius: 10px; font-size: 11px; color: var(--muted); a { text-decoration: underline; margin-left: 4px; } }
+.canvas-notice { position: absolute; z-index: 6; top: 84px; right: 16px; max-width: calc(100% - var(--conversation-width) - 40px); background: var(--surface); padding: 10px 16px; border: 1px solid var(--border); border-radius: 10px; font-size: 12px; color: var(--error); }
+.selected-actions { position: absolute; bottom: calc(100% + 10px); left: 50%; transform: translateX(-50%); z-index: 4; display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 4px; width: max-content; max-width: min(580px, 58vw); padding: 5px 8px; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; box-shadow: var(--shadow); white-space: nowrap; button { gap: 5px; color: var(--text-secondary); font-size: 12px; line-height: 17.6px; } }
+.canvas-toolbar, .selected-actions { :deep(svg) { stroke-width: 1.7; } }
 .text-placement { position: absolute; inset: 0; z-index: 2; cursor: text; touch-action: none; }
 .text-entry { position: absolute; left: 50%; bottom: 12px; transform: translateX(-50%); z-index: 5; width: min(320px, 100%); display: flex; gap: 6px; padding: 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); box-shadow: var(--shadow); textarea { min-width: 0; flex: 1; padding: 5px; border: 1px solid var(--border); font: inherit; resize: vertical; } }
-.tool-menu { position: relative; > div { position: absolute; top: calc(100% + 8px); right: 0; display: grid; min-width: 115px; padding: 5px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; box-shadow: var(--shadow); } }
-.tool-settings { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 6; display: grid; gap: 10px; width: 300px; padding: 18px; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; box-shadow: var(--shadow); font-size: 12px; label { display: grid; gap: 5px; } input, select, textarea { width: 100%; padding: 8px; border: 1px solid var(--border); border-radius: 6px; font: inherit; } > div { display: flex; justify-content: end; gap: 8px; } }
-.tool-status { padding: 6px 16px; background: var(--surface); font-size: 11px; border-top: 1px solid var(--border); header { display: flex; justify-content: space-between; align-items: center; } article { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 3px 0; } p { flex: 1; color: var(--error); } button { padding: 3px 7px; text-decoration: underline; } &.expanded { position: absolute; bottom: 124px; left: 12px; right: 12px; z-index: 7; max-height: 50%; overflow: auto; border: 1px solid var(--border); border-radius: 10px; box-shadow: var(--shadow); } }
-@media (max-width: 1100px) { .agent-canvas header { padding: 12px; gap: 6px; } .agent-canvas header span { display: none; } .canvas-zoom > span:first-child { display: none; } }
+.tool-menu { position: relative; font-size: 12px; > div { position: absolute; top: calc(100% + 8px); right: 0; display: grid; min-width: 115px; padding: 5px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; box-shadow: var(--shadow); } }
+.tool-settings { position: absolute; left: calc((100% + var(--conversation-width) + 20px) / 2); top: 50%; transform: translate(-50%, -50%); z-index: 6; display: grid; gap: 10px; width: 300px; padding: 18px; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; box-shadow: var(--shadow); font-size: 12px; label { display: grid; gap: 5px; } input, select, textarea { width: 100%; padding: 8px; border: 1px solid var(--border); border-radius: 6px; font: inherit; } > div { display: flex; justify-content: end; gap: 8px; } }
+.tool-status { position: absolute; z-index: 2; right: 16px; bottom: 148px; width: min(360px, calc(100% - var(--conversation-width) - 40px)); padding: 6px 12px; background: var(--surface); font-size: 12px; line-height: 1.7; border: 1px solid var(--border); border-radius: 10px; box-shadow: var(--shadow); header { display: flex; justify-content: space-between; align-items: center; } article { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 3px 0; } p { flex: 1; color: var(--error); } button { padding: 3px 7px; text-decoration: none; &:hover { text-decoration: underline; } } &.expanded { z-index: 7; max-height: 50%; overflow: auto; } }
+@media (max-width: 1100px) { .agent-canvas > header { padding: 12px; gap: 6px; } .agent-canvas > header span { display: none; } .canvas-zoom > span:first-child { display: none; } }
 </style>

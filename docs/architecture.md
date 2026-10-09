@@ -2,7 +2,7 @@
 
 ## 本地图片编辑
 
-当前 `codex/local-image-layer-tools` 分支保留整图生成，本地模型处理识字、抠图和拆层。商品图、套图、详情模块与复杂改图仍由 Codex 内置生图执行。`AgentModelProvider.processImage` 统一调度本地专用工具：PaddleOCR 的 PP-OCRv5 ONNX（RapidOCR）、BiRefNet、SAM 2.1 和 LaMa；业务层不读取模型原始输出。识字和抠图不调用 Codex；拆层清字后保留一次 Codex 前景语义分组，再在本地提取像素和修复背景，不再逐层生图生成蒙版。
+当前 `codex/local-image-layer-tools` 分支保留整图生成，本地模型处理识字、抠图和拆层。商品图、套图、详情模块与复杂改图仍由 Codex 内置生图执行。`AgentModelProvider.processImage` 统一调度本地专用工具：PaddleOCR 的 PP-OCRv5 ONNX（RapidOCR）、BiRefNet、SAM 2.1 和 LaMa；业务层不读取模型原始输出。识字和抠图不调用 Codex；拆层清字后通常做一次 Codex 前景语义分组，再在本地提取像素和修复背景。不可靠物体范围由本地工具返回严格校验的分割失败信息，提供者转换为 `LayerSegmentationError`，应用最多追加一次语义范围纠正；再次失败不保存结果。环境错误、取消和其他异常不触发该纠正，不逐层生图生成蒙版。
 
 沿用 ImageToolInput、ImageToolTask 和 EditorDocument，不新增前端请求字段或数据库表。运行环境和权重放在 `data/runtimes/image-tools`，任务输入、蒙版、输出与日志放在独立 `data/runs/image-tool-*/local-*`。任务执行阶段不下载模型；安装脚本预先下载并核对 SHA256。输出尺寸、图层格式、坐标和来源均校验，失败不保存半份结果，取消中止本地进程。本地背景修复采用带上下文的局部补全。
 
@@ -12,7 +12,11 @@
 
 每个作品继续使用现有 EditorDocument；同页和独立编辑器共用图片、素材、文字、形状、画笔、调色和自动保存。CreationScene 独立保存会话内画板 `{ resultId, x, y }`、视口 `{ x, y, zoom }`、selectedId 与 revision，SQLite `creation_scenes` 以 session_id 为主键。GET/PATCH `/api/editor/scenes/:sessionId` 校验所属会话与有限坐标；版本冲突拒绝覆盖，相同已保存重发返回当前值。
 
-`generateImage` 返回 PNG 字节，生成结果先作为整张图片进入编辑文档，不携带原生文字、商品或形状图层。手动新增的设计元素直接保存为 EditorDocument 图层；原图中的文字和前景按需提取。商品套图和详情模块先生成画面，再由 `renderCommerceImage` 使用 Sharp/SVG 合成底部标题与文案，最终保存的仍是整张图片。
+`generateImage` 返回 PNG 字节，生成结果先作为整张图片进入编辑文档，不携带模型原生文字、商品或形状图层。手动新增的设计元素直接保存为 EditorDocument 图层；原图中的文字和前景按需提取。`renderCommerceImage` 保存原始画面并返回图片、标题与文案图层；CommerceService 在同一事务创建结果与 EditorDocument。程序文字不是从生图模型取得的原生设计图层。
+
+浏览器编辑和服务端导出共用 `packages/editor/src/render.ts` 的 Konva 节点规则。服务端采用 CPU `@napi-rs/canvas` 画布处理图片、文字、形状、画笔、变换与调色；不调用模型。GET `/api/editor/results/:resultId/file` 输出最新保存的文档，原结果文件接口继续返回生成位图供图片图层使用，避免自引用。ZIP 和长图先读取所有模块的持久化文档快照，再串行渲染，长图按最大宽度居中拼接。不同窗口未保存的编辑不进入导出。
+
+`brand_presets` 保存名称、BrandStyle JSON 与时间；`creation_presets` 保存名称、功能类型、已有生成参数快照与时间。品牌样式为 `{ fontFamily, primaryColor, textColor, backgroundColor, styleDescription }`，套图参数可选 `brand: BrandStyle | null`。旧任务没有该字段时保持原结构。新任务直接保存品牌快照，重试不读取可变预设。GET/POST `/api/brand-presets` 与 `/api/creation-presets` 提供列表和创建，PATCH/DELETE `/:id` 更新与删除；方案 GET 可按 kind 筛选，更新不能改变 kind。快照通过公共严格校验后落库，方案素材可为空。
 
 图片工具使用 `/api/image-tools/tasks/session/:sessionId/events` 聚合同会话进度，每会话一条 SSE；结果与编辑文档原子保存。拆层先在本地识字和清字，再经 Codex 分析最多 8 个前景元素；本地分割和透明度细化提取原像素，合并前景选区后修复背景。局部改图、消除和无痕改字仍按原尺寸遮罩逐像素保留外部区域。独立任务目录和统一 AgentModelProvider 边界保持不变。
 
@@ -70,7 +74,7 @@ photo-studio/
 interface AgentModelProvider {
   run(input: AgentInput): AsyncIterable<AgentEvent>
   continue(sessionId: string, input: AgentInput): AsyncIterable<AgentEvent>
-  generateImage(taskId: string, source: Buffer | null, prompt: string, signal: AbortSignal): Promise<Buffer>
+  generateImage(taskId: string, source: Buffer | null, prompt: string, signal: AbortSignal, guide?: Buffer): Promise<Buffer>
   processImage(taskId: string, source: Buffer, input: LocalImageInput, signal: AbortSignal, progress: (value: number) => void): Promise<LocalImageOutput>
   cancel(taskId: string): Promise<void>
 }
@@ -126,7 +130,7 @@ LangGraph 保存业务状态并控制节点转换；Codex CLI 负责需求理解
 
 `ImageToolInput` 与 `ImageToolTask`、任务列表/单任务/SSE/停止/重试接口见 [创作工具契约](creation-tools-contract.md)，逐项处理方式见其 [功能表](creation-tools-contract.md#功能与处理方式)；SQLite 新增 `image_tool_tasks`、`image_tool_results`。结果复用既有图片下载、项目资产和编辑文档接口，外键使用真实工具任务，不能伪造商品图任务。所有智能处理经过 `AgentModelProvider`；独立运行目录、输出校验和完成时事务落库，重启中断不自动重跑。
 
-涂抹 PNG 与处理原图尺寸一致，白色为处理区、黑色为保留区；模型按粉色提示编辑后，应用在原尺寸按遮罩合成，保留区 RGBA 保持一致。拆层主体使用本地分割与透明度模型提取，原图像素与蒙版生成透明 PNG，再修复背景；本地识字返回真实文本及原图坐标，清除对应底图文字后保存可编辑图层。透明背景纳入编辑文档校验和 PNG 导出，生成原图保持不变。
+涂抹 PNG 与处理原图尺寸一致，白色为处理区、黑色为保留区；模型同时接收未染色的原图与粉色选区示意，原图作为字色、纹理和样式依据。扩图同时提供原图与目标画布位置示意，不把灰色边缘当成最终背景。两个附件仅在本任务目录中暴露。应用在原尺寸按遮罩合成，局部保留区 RGBA 与扩图原矩形保持一致；模型补全与边缘自然程度仍须视觉验收。拆层主体使用本地分割与透明度模型提取，原图像素与蒙版生成透明 PNG，再修复背景；本地识字返回真实文本及原图坐标，清除对应底图文字后保存可编辑图层。透明背景纳入编辑文档校验和 PNG 导出，生成原图保持不变。
 
 AI 改图、消除、无痕改字、超清和扩图继续走 `generateImage`。无痕改字返回位图文字；超清请求模型增强细节后由 Sharp 适配 2 倍/4 倍尺寸，当前未接入本地超分模型。扩图先生成扩大画布的场景，再把原图合成回原位置。画布基础编辑与下载尺寸倍率由 Konva/Sharp 处理，不调用 Codex。
 

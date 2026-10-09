@@ -21,7 +21,8 @@ function order(direction: number) {
       <CanvasImageAdjustments />
       <template v-if="editor.layer.type === 'text'">
         <label>文字内容<textarea v-model="editor.layer.text" rows="3" maxlength="2000" @input="editor.fitText(); editor.commit()" /></label>
-        <div class="paired"><label>字号<input v-model.number="editor.layer.fontSize" type="number" min="8" max="300" @change="editor.fitText(); editor.commit()" /></label><label>颜色<input v-model="editor.layer.fill" type="color" @change="editor.commit" /></label></div>
+        <div class="paired"><label>字号<input v-model.number="editor.layer.fontSize" type="number" min="8" max="300" @change="editor.fitText(); editor.commit()" /></label><label v-if="!editor.layer.fillGradient">颜色<input v-model="editor.layer.fill" type="color" @change="editor.commit" /></label></div>
+        <template v-if="editor.layer.fillGradient"><div class="paired"><label>渐变起始色<input v-model="editor.layer.fillGradient.colors[0]" type="color" @change="editor.commit" /></label><label>渐变结束色<input v-model="editor.layer.fillGradient.colors[1]" type="color" @change="editor.commit" /></label></div><label>渐变角度<input v-model.number="editor.layer.fillGradient.angle" type="number" min="0" max="360" @change="editor.commit" /></label></template>
         <label>字体<select v-model="editor.layer.fontFamily" @change="editor.fitText(); editor.commit()"><option v-for="font in EDITOR_FONT_FAMILIES" :key="font">{{ font }}</option></select></label>
         <label>文字对齐<select v-model="editor.layer.align" @change="editor.commit"><option value="left">左对齐</option><option value="center">居中</option><option value="right">右对齐</option></select></label>
         <div class="paired"><label>字间距<input :value="editor.layer.letterSpacing ?? 0" type="number" min="-20" max="100" step=".5" @input="editor.layer.letterSpacing = Number(($event.target as HTMLInputElement).value); editor.fitText(); editor.commit()" /></label><label>行高<input :value="editor.layer.lineHeight ?? 1" type="number" min=".5" max="5" step=".1" @input="editor.layer.lineHeight = Number(($event.target as HTMLInputElement).value); editor.fitText(); editor.commit()" /></label></div>
@@ -34,6 +35,7 @@ function order(direction: number) {
   </div>
 </template>
 <style scoped lang="scss">
-.canvas-properties { fieldset { border: 0; padding: 0; margin: 16px 0 0; min-width: 0; } legend { font-weight: 600; } label { display: grid; gap: 5px; margin: 10px 0; color: var(--text-secondary); } input, select, textarea { width: 100%; min-width: 0; border: 1px solid var(--border); border-radius: 5px; padding: 6px; background: var(--surface); color: var(--text); font: inherit; } input[type='color'] { padding: 2px; height: 29px; } p { color: var(--muted); line-height: 1.8; } button { border: 1px solid var(--border); background: var(--surface); font: inherit; padding: 6px; border-radius: 5px; } }
+.canvas-properties { fieldset { border: 0; padding: 0; margin: 16px 0 0; min-width: 0; } legend { font-size: 13px; font-weight: 500; color: var(--text); } label { display: grid; gap: 5px; margin: 10px 0; color: var(--text-secondary); } input, select, textarea { width: 100%; min-width: 0; border: 1px solid var(--border); border-radius: 5px; padding: 6px; background: var(--surface); color: var(--text); font: inherit; } input[type='color'] { padding: 2px; height: 29px; } p { color: var(--muted); line-height: 1.8; } button { border: 1px solid var(--border); background: var(--surface); color: var(--text-secondary); font: inherit; padding: 6px; border-radius: 5px; &:hover { background: var(--nav-hover); border-color: var(--border-strong); color: var(--accent); } }
+}
 .paired { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 6px; }
 </style>

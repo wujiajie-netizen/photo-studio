@@ -1,5 +1,9 @@
 import sharp from 'sharp';
-import { PRODUCT_UPLOAD_LIMIT, validateProductImageParameters, validateCommerceParameters, type CommerceParameters, type ProductImageParameters } from '@photo-studio/shared';
+import { randomUUID } from 'node:crypto';
+import { PRODUCT_UPLOAD_LIMIT, validateProductImageParameters, validateCommerceParameters, type CommerceParameters, type ProductImageParameters, type EditorLayer } from '@photo-studio/shared';
+
+export interface CommerceRenderContext { parameters: CommerceParameters; sectionIndex: number }
+export type CommerceImageRenderer = (input: Buffer | null, parameters: ProductImageParameters, index: number, signal: AbortSignal, context?: CommerceRenderContext) => Promise<{ data: Buffer; width: number; height: number }>;
 
 export function prepareProductImage(input: Buffer): Promise<{ data: Buffer; width: number; height: number }> {
   if (!input.length || input.length > PRODUCT_UPLOAD_LIMIT) return Promise.reject(new Error('图片大小必须在 20 MB 以内。'));
@@ -40,28 +44,26 @@ export function renderMockProductImage(input: Buffer | null, parameters: Product
     });
 }
 
-export function renderCommerceImage(input: Buffer | null, parameters: CommerceParameters, index: number, signal: AbortSignal, render: typeof renderMockProductImage): Promise<{ data: Buffer; width: number; height: number }> {
+export function renderCommerceImage(input: Buffer | null, parameters: CommerceParameters, index: number, signal: AbortSignal, render: CommerceImageRenderer, resultId: string): Promise<{ data: Buffer; width: number; height: number; background: string; layers: EditorLayer[] }> {
   validateCommerceParameters(parameters);
   if (!Number.isInteger(index) || index < 0 || index >= parameters.sections.length) return Promise.reject(new Error('图片模块序号无效。'));
   const section = parameters.sections[index];
-  /* 每个模块使用用户确认的文案；文本转义后绘制到透明底，图片与文字区域分开，避免遮挡商品。 */
-  return render(input, { sourceAssetId: parameters.sourceAssetId, subject: parameters.subject, scene: parameters.scene, description: section.content.slice(0, 1000), ratio: parameters.ratio, count: 1, quality: parameters.quality }, 0, signal).then(({ data, width, height }) => {
+  /* 图片引擎保留原始位图，程序排版保存为真实文字层；完整电商事实独立传递，避免描述长度截断。 */
+  return render(input, { sourceAssetId: parameters.sourceAssetId, subject: parameters.subject, scene: parameters.scene, description: section.content, ratio: parameters.ratio, count: 1, quality: parameters.quality }, 0, signal, { parameters, sectionIndex: index }).then(({ data, width, height }) => {
     if (signal.aborted) throw new Error('任务已取消。');
-    const escape = (value: string) => value.replace(/[&<>"']/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;' })[character]!);
-    const title = [...section.title];
-    const titleLines = Array.from({ length: Math.ceil(title.length / 22) }, (_, line) => title.slice(line * 22, (line + 1) * 22).join(''));
-    const characters = [...section.content];
-    const lines = Array.from({ length: Math.ceil(characters.length / 34) }, (_, line) => characters.slice(line * 34, (line + 1) * 34).join(''));
-    const fontSize = Math.max(10, Math.floor(Math.min(width * .038, height * .36 / (titleLines.length * 1.4 + lines.length * .87 + 2))));
-    const textHeight = Math.round((titleLines.length * 1.4 + lines.length * 1.5 * .58 + 2) * fontSize);
-    return sharp(data).resize({ width, height: height - textHeight, fit: 'contain', background: '#ffffff' }).png().toBuffer().then((product) => {
-      const productHeight = height - textHeight;
-      const outputHeight = height;
-      const svg = `<svg width="${width}" height="${textHeight}"><rect width="100%" height="100%" fill="#ffffff"/><g font-family="Microsoft YaHei,Arial,sans-serif" fill="#202020"><text x="${width * .06}" y="${fontSize * 1.4}" font-size="${fontSize}" font-weight="bold">${titleLines.map((line, row) => `<tspan x="${width * .06}" dy="${row ? fontSize * 1.4 : 0}">${escape(line)}</tspan>`).join('')}</text><text x="${width * .06}" y="${fontSize * (titleLines.length * 1.4 + 1.2)}" font-size="${Math.round(fontSize * .58)}">${lines.map((line, row) => `<tspan x="${width * .06}" dy="${row ? fontSize * .87 : 0}">${escape(line)}</tspan>`).join('')}</text></g></svg>`;
-      return sharp({ create: { width, height: outputHeight, channels: 4, background: '#ffffff' } }).composite([{ input: product, left: 0, top: 0 }, { input: Buffer.from(svg), left: 0, top: productHeight }]).png().toBuffer().then((output) => {
-        if (signal.aborted) throw new Error('任务已取消。');
-        return { data: output, width, height: outputHeight };
-      });
-    });
+    const titleLines = section.title.split('\n').reduce((sum, line) => sum + Math.max(1, Math.ceil([...line].length / 22)), 0);
+    const bodyLines = section.content ? section.content.split('\n').reduce((sum, line) => sum + Math.max(1, Math.ceil([...line].length / 34)), 0) : 0;
+    const fontSize = Math.max(14, Math.floor(Math.min(width * .038, height * .36 / (titleLines * 1.4 + bodyLines * .87 + 2))));
+    const textHeight = Math.round((titleLines * 1.4 + bodyLines * 1.5 * .58 + 2) * fontSize);
+    if (textHeight >= height) throw new Error('模块文字换行过多，请减少空行后重新生成。');
+    const productHeight = height - textHeight; const scale = productHeight / height;
+    const fontFamily = parameters.brand?.fontFamily ?? 'Microsoft YaHei'; const fill = parameters.brand?.textColor ?? '#202020';
+    const base = { rotation: 0, opacity: 1, visible: true, locked: false };
+    const layers: EditorLayer[] = [
+      { ...base, id: randomUUID(), type: 'image', name: '商品原图', resultId, x: width * (1 - scale) / 2, y: 0, width: width * scale, height: productHeight },
+      { ...base, id: randomUUID(), type: 'text', name: '模块标题', x: width * .06, y: productHeight + fontSize * .2, width: width * .88, height: fontSize * titleLines * 1.4, text: section.title, fontSize, fontFamily, fill: parameters.brand?.primaryColor ?? fill, align: 'left', fontStyle: 'bold', lineHeight: 1.4 },
+      { ...base, id: randomUUID(), type: 'text', name: '模块文案', x: width * .06, y: productHeight + fontSize * (titleLines * 1.4 + .6), width: width * .88, height: Math.max(1, fontSize * Math.max(1, bodyLines) * .87), text: section.content, fontSize: Math.round(fontSize * .58), fontFamily, fill, align: 'left', lineHeight: 1.5 }
+    ];
+    return { data, width, height, background: parameters.brand?.backgroundColor ?? '#ffffff', layers };
   });
 }

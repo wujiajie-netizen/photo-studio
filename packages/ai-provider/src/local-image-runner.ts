@@ -5,6 +5,10 @@ import { resolve } from 'node:path';
 import { validateEditorContent } from '@photo-studio/shared';
 import type { LocalImageInput, LocalImageOutput } from './model-provider';
 
+export class LayerSegmentationError extends Error {
+  constructor(readonly layerName: string, message: string) { super(message); }
+}
+
 export class LocalImageRunner {
   constructor(private readonly runsDirectory: string) {}
 
@@ -51,7 +55,19 @@ export class LocalImageRunner {
         clearTimeout(timer); signal.removeEventListener('abort', cancel);
         writeFile(resolve(directory, 'stderr.log'), stderr, 'utf8').then(() => {
           if (signal.aborted) throw new Error('图片处理已停止。');
-          if (failure || code !== 0 || output.trim()) throw new Error(failure || stderr.trim().split('\n').at(-1)?.slice(0, 300) || '本地图片处理失败。');
+          if (failure || output.trim()) throw new Error(failure || '本地图片处理失败。');
+          if (code !== 0) {
+            /* 仅规范化明确的分割失败，业务不解析 Python 日志，也不重试环境或模型启动错误。 */
+            return readFile(resolve(directory, 'failure.json'), 'utf8').catch(error => { if (error.code === 'ENOENT') return null; throw error; }).then(raw => {
+              if (raw !== null) {
+                if (raw.length > 2048) throw new Error('本地图片工具失败信息无效。');
+                const value = JSON.parse(raw) as { code: string; name: string; message: string };
+                if (!value || Object.keys(value).length !== 3 || value.code !== 'unreliable-layer' || typeof value.name !== 'string' || typeof value.message !== 'string' || !value.message.trim() || value.message.length > 300 || input.operation !== 'split-layers' || !input.objects.some(item => item.name === value.name)) throw new Error('本地图片工具失败信息无效。');
+                throw new LayerSegmentationError(value.name, value.message);
+              }
+              throw new Error(stderr.trim().split('\n').at(-1)?.slice(0, 300) || '本地图片处理失败。');
+            });
+          }
         }).then(done, reject);
       });
     })).then(() => {
@@ -63,7 +79,7 @@ export class LocalImageRunner {
       for (const image of value.images) if (!image || Object.keys(image).length !== 3 || typeof image.name !== 'string' || !image.name.trim() || image.name.length > 100 || ![image.width, image.height].every(Number.isInteger) || image.width < 1 || image.height < 1 || image.width * image.height > 16_000_000) throw new Error('本地图片工具图层无效。');
       const { width, height } = value.images[0];
       if (value.images.some(image => image.width !== width || image.height !== height)) throw new Error('拆分图层尺寸必须与底图一致。');
-      const textKeys = ['text', 'x', 'y', 'width', 'height', 'rotation', 'fill', 'align', 'fontFamily', 'fontSize', 'fontStyle', 'letterSpacing', 'lineHeight'];
+      const textKeys = ['text', 'x', 'y', 'width', 'height', 'rotation', 'fill', 'fillGradient', 'align', 'fontFamily', 'fontSize', 'fontStyle', 'letterSpacing', 'lineHeight'];
       for (const text of value.text) if (!text || Object.keys(text).some(key => !textKeys.includes(key)) || text.x < 0 || text.y < 0 || text.x + text.width > width || text.y + text.height > height) throw new Error('文字图层内容或位置无效。');
       validateEditorContent({ name: '本地图片处理', width, height, background: 'transparent', layers: value.text.map(text => ({ ...text, id: randomUUID(), type: 'text', name: text.text.slice(0, 40), opacity: 1, visible: true, locked: false })) });
       return Promise.all(value.images.map((image, index) => realpath(resolve(directory, `image-${index}.png`)).then(actual => {

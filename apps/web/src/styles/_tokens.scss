@@ -1,18 +1,22 @@
-// 中性色和主按钮参考已采集的工作台截图，版式与品牌表达为自主设计。
+// 统一工作台与编辑区的浅色视觉，紫色用于创作入口和交互反馈。
 :root {
-  --page: #f6f7f9;
+  --page: #f8f9fc;
   --surface: #ffffff;
-  --sidebar: #eceff3;
-  --nav-active: #dfe3eb;
-  --nav-hover: #e5e8ee;
-  --text: #202020;
-  --text-secondary: #484c53;
-  --muted: #868b94;
-  --border: #e6e7eb;
-  --border-strong: #d2d5da;
-  --success: #42745c;
-  --error: #a43636;
-  --radius: 20px;
+  --sidebar: #ffffff;
+  --nav-active: #eee9ff;
+  --nav-hover: #f5f2ff;
+  --text: #242238;
+  --text-secondary: #5d5b70;
+  --muted: #858496;
+  --border: #eaeaf2;
+  --border-strong: #d7d2e7;
+  --accent: #7755e8;
+  --accent-soft: #f1edff;
+  --accent-gradient: linear-gradient(120deg, #8060ed, #a06aef);
+  --success: #27866b;
+  --error: #bb475c;
+  --radius: 22px;
   --radius-sm: 12px;
-  --shadow: 0 8px 28px rgb(32 32 32 / 3%);
+  --shadow: 0 12px 36px rgb(54 42 100 / 7%);
+  --shadow-hover: 0 18px 44px rgb(67 48 118 / 12%);
 }

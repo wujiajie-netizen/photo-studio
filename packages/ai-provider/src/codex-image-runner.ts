@@ -17,8 +17,9 @@ export class CodexImageRunner {
     return running?.closed ?? Promise.resolve();
   }
 
-  generate(taskId: string, source: Buffer | null, prompt: string, signal: AbortSignal): Promise<Buffer> {
+  generate(taskId: string, source: Buffer | null, prompt: string, signal: AbortSignal, guide?: Buffer): Promise<Buffer> {
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(taskId) || source !== null && (!Buffer.isBuffer(source) || !source.length || source.length > 20 * 1024 * 1024) || !prompt.trim() || prompt.length > 5000) return Promise.reject(new ImageGenerationError('Codex 图片输入无效。'));
+    if (guide !== undefined && (source === null || !Buffer.isBuffer(guide) || !guide.length || guide.length > 20 * 1024 * 1024)) return Promise.reject(new ImageGenerationError('Codex 图片示意无效。'));
     if (this.active.has(taskId) || this.preparing.has(taskId)) return Promise.reject(new ImageGenerationError('Codex 图片任务已在运行。'));
     const controller = new AbortController();
     const cancel = () => controller.abort(); signal.addEventListener('abort', cancel, { once: true });
@@ -30,12 +31,13 @@ export class CodexImageRunner {
     return Promise.resolve().then(() => { check(); return inspectCodex(); })
       .then((status) => { check(); if (status.status !== 'ready') throw new ImageGenerationError(status.message); return mkdir(directory, { recursive: true }); })
       .then(() => realpath(directory)).then((actual) => { check(); if (actual.toLowerCase() !== directory.toLowerCase()) throw new ImageGenerationError('图片任务目录不能使用符号链接。'); if (source) return writeFile(resolve(directory, 'source.png'), source); })
+      .then(() => { check(); if (guide) return writeFile(resolve(directory, 'guide.png'), guide); })
       .then(() => writeFile(resolve(directory, 'input.txt'), prompt, 'utf8'))
-      .then(() => { check(); return this.start(taskId, directory, prompt, controller.signal, source !== null); })
+      .then(() => { check(); return this.start(taskId, directory, prompt, controller.signal, source !== null, guide !== undefined); })
       .finally(() => { this.preparing.delete(taskId); signal.removeEventListener('abort', cancel); });
   }
 
-  private start(taskId: string, directory: string, prompt: string, signal: AbortSignal, hasSource: boolean): Promise<Buffer> {
+  private start(taskId: string, directory: string, prompt: string, signal: AbortSignal, hasSource: boolean, hasGuide: boolean): Promise<Buffer> {
     const executable = findCodexExecutable();
     if (!executable) return Promise.reject(new ImageGenerationError('未找到 Codex CLI。'));
     const config: Record<string, unknown> = {
@@ -134,7 +136,7 @@ export class CodexImageRunner {
         }).then((response) => {
           const thread = response.thread as { id: string }; threadId = thread.id;
           if (!threadId) throw new Error();
-          return send('turn/start', { threadId, input: [{ type: 'text', text: prompt }, ...(hasSource ? [{ type: 'localImage', path: resolve(directory, 'source.png') }] : [])], cwd: directory });
+          return send('turn/start', { threadId, input: [{ type: 'text', text: prompt }, ...(hasSource ? [{ type: 'localImage', path: resolve(directory, 'source.png') }] : []), ...(hasGuide ? [{ type: 'localImage', path: resolve(directory, 'guide.png') }] : [])], cwd: directory });
         }).catch((error: Error) => finish(error instanceof ImageGenerationError ? error : new ImageGenerationError('无法准备 Codex 图片任务，请检查本地设置。')));
     });
   }

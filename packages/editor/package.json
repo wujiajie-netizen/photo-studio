@@ -5,6 +5,8 @@
   "type": "module",
   "main": "src/index.ts",
   "types": "src/index.ts",
-  "scripts": { "typecheck": "tsc --noEmit" },
+  "typesVersions": { "*": { "render": ["dist/render.d.ts"] } },
+  "exports": { ".": "./src/index.ts", "./render": { "types": "./dist/render.d.ts", "default": "./dist/render.js" } },
+  "scripts": { "build": "tsc -p tsconfig.build.json", "typecheck": "tsc --noEmit" },
   "dependencies": { "@photo-studio/shared": "0.1.0", "konva": "^10.3.0" }
 }

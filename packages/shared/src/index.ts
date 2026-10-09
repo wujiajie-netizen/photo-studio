@@ -78,6 +78,7 @@ export interface CommerceParameters {
   language: 'zh-CN' | 'en-US' | 'ja-JP' | 'de-DE';
   sellingPoints: string[];
   sections: CommerceSection[];
+  brand?: BrandStyle | null;
 }
 export interface CommerceItem {
   id: string;
@@ -102,7 +103,8 @@ export interface CommerceTask {
 export function validateCommerceParameters(value: unknown): CommerceParameters {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('请填写商品和模块参数。');
   const parameters = value as CommerceParameters;
-  if (Object.keys(parameters).length !== 11) throw new Error('商品和模块参数包含未知或缺少字段。');
+  if (Object.keys(parameters).length !== 11 + Number(Object.hasOwn(parameters, 'brand'))) throw new Error('商品和模块参数包含未知或缺少字段。');
+  if (parameters.brand !== undefined && parameters.brand !== null) validateBrandStyle(parameters.brand);
   validateProductImageParameters({ sourceAssetId: parameters.sourceAssetId, subject: parameters.subject, scene: parameters.scene, ratio: parameters.ratio, quality: parameters.quality, description: '', count: 1 });
   if (typeof parameters.productName !== 'string' || !parameters.productName.trim() || [...parameters.productName].length > 80) throw new Error('商品名称为 1 到 80 个字符。');
   if (!['general', 'taobao', 'jd', 'amazon', 'shopify'].includes(parameters.platform) || !['CN', 'US', 'GB', 'EU', 'JP'].includes(parameters.region) || !['zh-CN', 'en-US', 'ja-JP', 'de-DE'].includes(parameters.language)) throw new Error('平台、地区或语言无效。');
@@ -132,9 +134,53 @@ interface EditorLayerBase {
 }
 export interface EditorImageAdjustments { brightness: number; contrast: number; saturation: number; blur: number }
 export interface EditorImageLayer extends EditorLayerBase { type: 'image'; resultId: string; adjustments?: EditorImageAdjustments }
-export interface EditorAssetImageLayer extends EditorLayerBase { type: 'asset-image'; assetId: string; adjustments?: EditorImageAdjustments }
+export interface EditorAssetImageLayer extends EditorLayerBase { type: 'asset-image'; assetId: string; matteSourceAssetId?: string; adjustments?: EditorImageAdjustments }
 export const EDITOR_FONT_FAMILIES = Object.freeze(['Microsoft YaHei', 'SimSun', 'SimHei', 'KaiTi', 'Arial', 'Georgia', 'Times New Roman']);
-export interface EditorTextLayer extends EditorLayerBase { type: 'text'; text: string; fontSize: number; fontFamily: string; fill: string; align: 'left' | 'center' | 'right'; fontStyle?: 'normal' | 'bold' | 'italic' | 'bold italic'; textDecoration?: '' | 'underline' | 'line-through'; letterSpacing?: number; lineHeight?: number }
+export interface BrandStyle {
+  fontFamily: string;
+  primaryColor: string;
+  textColor: string;
+  backgroundColor: string;
+  styleDescription: string;
+}
+export interface BrandPreset extends BrandStyle { id: string; name: string; createdAt: string; updatedAt: string }
+export type BrandPresetInput = BrandStyle & { name: string };
+export type CreationPresetInput =
+  | { name: string; kind: 'product-image'; parameters: ProductImageParameters }
+  | { name: string; kind: CommerceKind; parameters: CommerceParameters };
+export type CreationPreset = CreationPresetInput & { id: string; createdAt: string; updatedAt: string };
+export interface LocalImageToolsStatus { status: 'ready' | 'missing' | 'error'; message: string }
+export interface LocalTaskSummary { groups: { kind: 'agent' | 'execution' | 'product-image' | 'commerce' | 'image-tool'; counts: Record<TaskStatus, number> }[] }
+
+export function validateBrandStyle(value: unknown): BrandStyle {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('品牌样式无效。');
+  const style = value as BrandStyle;
+  if (Object.keys(style).sort().join(',') !== 'backgroundColor,fontFamily,primaryColor,styleDescription,textColor' || !EDITOR_FONT_FAMILIES.includes(style.fontFamily) || ![style.primaryColor, style.textColor, style.backgroundColor].every(color => typeof color === 'string' && /^#[0-9a-f]{6}$/i.test(color)) || typeof style.styleDescription !== 'string' || [...style.styleDescription].length > 1000) throw new Error('请选择支持的字体和有效的品牌颜色，风格描述最多 1000 个字符。');
+  return style;
+}
+
+export function validateBrandPresetInput(value: unknown): BrandPresetInput {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('品牌预设无效。');
+  const { name, ...style } = value as BrandPresetInput;
+  const error = getProjectNameError(name);
+  if (error) throw new Error(error);
+  validateBrandStyle(style);
+  return { name: name.trim(), ...style };
+}
+
+export function validateCreationPresetInput(value: unknown): CreationPresetInput {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('创作方案无效。');
+  const preset = value as CreationPresetInput;
+  const error = getProjectNameError(preset.name);
+  if (error) throw new Error(error);
+  if (Object.keys(preset).sort().join(',') !== 'kind,name,parameters') throw new Error('创作方案包含未知或缺少字段。');
+  if (preset.kind === 'product-image') validateProductImageParameters(preset.parameters);
+  else if (preset.kind === 'product-kit' || preset.kind === 'detail-page') validateCommerceParameters(preset.parameters);
+  else throw new Error('创作方案类型无效。');
+  return { ...preset, name: preset.name.trim() };
+}
+
+export interface EditorTextLayer extends EditorLayerBase { type: 'text'; text: string; fontSize: number; fontFamily: string; fill: string; align: 'left' | 'center' | 'right'; fontStyle?: 'normal' | 'bold' | 'italic' | 'bold italic'; textDecoration?: '' | 'underline' | 'line-through'; letterSpacing?: number; lineHeight?: number; fillGradient?: { colors: [string, string]; angle: number } }
 export interface EditorShapeLayer extends EditorLayerBase { type: 'shape'; shape: 'rectangle' | 'ellipse' | 'triangle' | 'star' | 'line' | 'arrow'; fill: string; stroke: string; strokeWidth: number }
 export interface EditorPathLayer extends EditorLayerBase { type: 'path'; points: number[]; stroke: string; strokeWidth: number }
 export type EditorLayer = EditorImageLayer | EditorAssetImageLayer | EditorTextLayer | EditorShapeLayer | EditorPathLayer;
@@ -203,9 +249,11 @@ export function validateEditorContent(value: unknown): EditorContent {
     if (layer.type === 'image') {
       if (Object.keys(layer).length !== 12 + Number(Object.hasOwn(layer, 'adjustments')) || typeof layer.resultId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(layer.resultId)) throw new Error('图片图层必须使用已生成的图片编号。');
     } else if (layer.type === 'asset-image') {
-      if (Object.keys(layer).length !== 12 + Number(Object.hasOwn(layer, 'adjustments')) || typeof layer.assetId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(layer.assetId)) throw new Error('素材图层必须使用已上传的素材编号。');
+      if (Object.keys(layer).length !== 12 + Number(Object.hasOwn(layer, 'adjustments')) + Number(Object.hasOwn(layer, 'matteSourceAssetId')) || typeof layer.assetId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(layer.assetId)) throw new Error('素材图层必须使用已上传的素材编号。');
+      if (Object.hasOwn(layer, 'matteSourceAssetId') && (typeof layer.matteSourceAssetId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(layer.matteSourceAssetId))) throw new Error('抠图修整必须明确引用原素材。');
     } else if (layer.type === 'text') {
-      const optional = ['fontStyle', 'textDecoration', 'letterSpacing', 'lineHeight'].filter(key => Object.hasOwn(layer, key));
+      const optional = ['fontStyle', 'textDecoration', 'letterSpacing', 'lineHeight', 'fillGradient'].filter(key => Object.hasOwn(layer, key));
+      if (layer.fillGradient !== undefined && (!layer.fillGradient || Array.isArray(layer.fillGradient) || Object.keys(layer.fillGradient).length !== 2 || !Array.isArray(layer.fillGradient.colors) || layer.fillGradient.colors.length !== 2 || !layer.fillGradient.colors.every(color) || !Number.isFinite(layer.fillGradient.angle) || layer.fillGradient.angle < 0 || layer.fillGradient.angle > 360)) throw new Error('文字渐变颜色或角度无效。');
       if (Object.keys(layer).length !== 16 + optional.length || typeof layer.text !== 'string' || [...layer.text].length > 2000 || !Number.isFinite(layer.fontSize) || layer.fontSize < 8 || layer.fontSize > 300 || !EDITOR_FONT_FAMILIES.includes(layer.fontFamily) || !color(layer.fill) || !['left', 'center', 'right'].includes(layer.align) || layer.fontStyle !== undefined && !['normal', 'bold', 'italic', 'bold italic'].includes(layer.fontStyle) || layer.textDecoration !== undefined && !['', 'underline', 'line-through'].includes(layer.textDecoration) || layer.letterSpacing !== undefined && (!Number.isFinite(layer.letterSpacing) || layer.letterSpacing < -20 || layer.letterSpacing > 100) || layer.lineHeight !== undefined && (!Number.isFinite(layer.lineHeight) || layer.lineHeight < .5 || layer.lineHeight > 5)) throw new Error('文字图层内容或格式无效。');
     } else if (layer.type === 'shape') {
       if (Object.keys(layer).length !== 15 || !['rectangle', 'ellipse', 'triangle', 'star', 'line', 'arrow'].includes(layer.shape) || layer.fill !== 'transparent' && !color(layer.fill) || layer.stroke !== 'transparent' && !color(layer.stroke) || !Number.isFinite(layer.strokeWidth) || layer.strokeWidth < 0 || layer.strokeWidth > 300) throw new Error('形状、颜色或边框无效。');

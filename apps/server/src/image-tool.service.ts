@@ -4,7 +4,7 @@ import { mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import sharp from 'sharp';
 import { Subject } from 'rxjs';
-import type { AgentModelProvider, LocalImageOutput } from '@photo-studio/ai-provider';
+import { LayerSegmentationError, type AgentModelProvider, type LocalImageOutput } from '@photo-studio/ai-provider';
 import { validateImageToolInput, type EditorLayer, type ImageToolInput, type ImageToolTask, type ProductImageResult } from '@photo-studio/shared';
 import { AGENT_MODEL_PROVIDER } from './agent.service';
 import { StorageService } from './storage.service';
@@ -111,8 +111,8 @@ export class ImageToolService {
         return Promise.all(savedPaths.map(path => unlink(path).catch(() => {}))).then(() => {});
       }).finally(() => { clearTimeout(timer); this.running = null; if (!this.stopped) this.pump(); });
   }
-  private generate(id: string, source: Buffer, prompt: string, width: number, height: number, signal: AbortSignal): Promise<Buffer> {
-    return this.provider.generateImage(id, source, prompt, signal).then(data => {
+  private generate(id: string, source: Buffer, prompt: string, width: number, height: number, signal: AbortSignal, guide?: Buffer): Promise<Buffer> {
+    return this.provider.generateImage(id, source, prompt, signal, guide).then(data => {
       if (signal.aborted) throw new Error('图片处理已停止。');
       return sharp(data, { failOn: 'warning', limitInputPixels: 16_000_000 }).metadata().then(info => {
         if (info.format !== 'png' || (info.pages ?? 1) !== 1) throw new Error('图片处理返回了无效的图片。');
@@ -127,7 +127,8 @@ export class ImageToolService {
       alpha = data;
       return sharp({ create: { width: asset.width, height: asset.height, channels: 3, background: '#ec4899' } }).joinChannel(Buffer.from(data.map(value => Math.round(value * .42))), { raw: { width: asset.width, height: asset.height, channels: 1 } }).png().toBuffer();
     }).then(overlay => sharp(source).composite([{ input: overlay }]).png().toBuffer())
-      .then(guide => this.generate(task.id, guide, `${prompt} The translucent pink overlay marks the editable region. Remove the pink marking in the final image; preserve all unmarked content. Match the original ${asset.width}x${asset.height} composition.`, asset.width, asset.height, signal))
+      /* 原图提供真实字色和背景；第二张仅标记范围，避免把选区染色当成设计样式。 */
+      .then(guide => this.generate(task.id, source, `${prompt} Image 1 is the untouched original and is the sole reference for colors, texture, text style and lighting. Image 2 is only a selection guide: its translucent pink overlay marks the editable region, not a desired color or background panel. Return one ${asset.width}x${asset.height} image matching image 1 exactly outside the selection. Inside it, match the original background continuously without a box, patch edge or pink tint. Do not reproduce the guide overlay.`, asset.width, asset.height, signal, guide))
       .then(data => {
         /* 局部改图逐像素保留黑色区域，模型输出只能影响用户涂抹的选区。 */
         return Promise.all([sharp(source).ensureAlpha().raw().toBuffer(), sharp(data).ensureAlpha().raw().toBuffer()]).then(([original, generated]) => {
@@ -137,41 +138,69 @@ export class ImageToolService {
         });
       });
   }
-  private objects(task: ImageToolTask, source: Buffer, signal: AbortSignal): Promise<ImageRegion[]> {
+  private objects(task: ImageToolTask, source: Buffer, signal: AbortSignal, correction?: { objects: ImageRegion[]; name: string; message: string }): Promise<ImageRegion[]> {
     const { width, height } = this.images.asset(task.input.sourceAssetId);
     const schema = { type: 'object', properties: { objects: { type: 'array', minItems: 1, maxItems: 8, items: { type: 'object', properties: { name: { type: 'string' }, x: { type: 'integer' }, y: { type: 'integer' }, width: { type: 'integer' }, height: { type: 'integer' } }, required: ['name', 'x', 'y', 'width', 'height'], additionalProperties: false } } }, required: ['objects'], additionalProperties: false };
-    const iterator = this.provider.run({ taskId: task.id, images: [source], schema, prompt: `Separate the actual foreground product and independent decorative objects with closed, traceable silhouettes in this ${width}x${height} image into editable image layers. Return ORIGINAL pixel bounding boxes and short Chinese names. The first object is the main product; each other object must be one independently visible element, do not group scattered decorations. Exclude text, backgrounds, gradients, shadows, reflections, floor patterns, ambient lighting and atmospheric effects: these remain part of the background scene. No invented objects, maximum 8 objects.` })[Symbol.asyncIterator]();
-    const consume = (): Promise<ImageRegion[]> => iterator.next().then(event => {
+    /* 原图用于判断物体；独立坐标参考图帮助定位，不把网格写入素材或分割输入。 */
+    const step = Math.max(50, Math.round(Math.max(width, height) / 10 / 50) * 50);
+    const lines: string[] = [];
+    for (let x = 0; x < width; x += step) lines.push(`<path d="M${x} 0V${height}"/><text x="${x + 3}" y="16">x=${x}</text>`);
+    for (let y = 0; y < height; y += step) lines.push(`<path d="M0 ${y}H${width}"/><text x="3" y="${y + 16}">y=${y}</text>`);
+    if (correction) correction.objects.forEach((object, index) => lines.push(`<rect x="${object.x}" y="${object.y}" width="${object.width}" height="${object.height}" fill="none" stroke="#e23b50" stroke-width="3"/><text x="${object.x + 4}" y="${object.y + 16}" fill="#e23b50" stroke="white">#${index + 1}</text>`));
+    const grid = Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}"><g fill="#ffffff" stroke="#1677ff" stroke-width="1" font-family="Arial" font-size="14">${lines.join('')}</g></svg>`);
+    /* 小物体纠正时补充放大局部，所有标签仍使用原图坐标；仅用于分析，不改变分割源图。 */
+    const details = correction ? correction.objects.map((object, index) => ({ object, index })).filter(({ object, index }) => index > 0 && Math.max(object.width, object.height) < Math.min(width, height) * .2).map(({ object, index }) => {
+      const padding = Math.max(32, Math.max(object.width, object.height)); const left = Math.max(0, object.x - padding); const top = Math.max(0, object.y - padding);
+      return { object, index, left, top, width: Math.min(width, object.x + object.width + padding) - left, height: Math.min(height, object.y + object.height + padding) - top };
+    }) : [];
+    return Promise.all([sharp(source).composite([{ input: grid }]).png().toBuffer(), ...details.map(detail => {
+      const spacing = Math.max(10, Math.round(Math.max(detail.object.width, detail.object.height) / 4 / 10) * 10); const marks: string[] = [];
+      for (let x = Math.ceil(detail.left / spacing) * spacing; x < detail.left + detail.width; x += spacing) marks.push(`<path d="M${x - detail.left} 0V${detail.height}"/><text x="${x - detail.left + 2}" y="11">${x}</text>`);
+      for (let y = Math.ceil(detail.top / spacing) * spacing; y < detail.top + detail.height; y += spacing) marks.push(`<path d="M0 ${y - detail.top}H${detail.width}"/><text x="2" y="${y - detail.top + 11}">${y}</text>`);
+      const overlay = Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="${detail.width}" height="${detail.height}"><g fill="white" stroke="#1677ff" stroke-width=".4" font-family="Arial" font-size="9">${marks.join('')}</g><rect x="${detail.object.x - detail.left}" y="${detail.object.y - detail.top}" width="${detail.object.width}" height="${detail.object.height}" fill="none" stroke="#e23b50" stroke-width="1"/></svg>`);
+      return sharp(source).extract({ left: detail.left, top: detail.top, width: detail.width, height: detail.height }).composite([{ input: overlay }]).png().toBuffer().then(crop => sharp(crop).resize({ width: Math.min(1024, detail.width * 3), height: Math.min(1024, detail.height * 3), fit: 'inside' }).png().toBuffer());
+    })]).then(([guide, ...closeups]) => {
       if (signal.aborted) throw new Error('图层分析已停止。');
-      if (event.done) throw new Error('图层分析没有返回结果。');
-      if (event.value.type === 'failed') throw new Error(event.value.message);
-      if (event.value.type === 'cancelled') throw new Error('图层分析已停止。');
-      if (event.value.type !== 'completed') return consume();
-      const value = event.value.result as { objects: ImageRegion[] };
-      if (!value || Object.keys(value).length !== 1 || !Array.isArray(value.objects) || !value.objects.length || value.objects.length > 8 || value.objects.some(item => !item || Object.keys(item).length !== 5 || typeof item.name !== 'string' || !item.name.trim() || item.name.length > 100 || ![item.x, item.y, item.width, item.height].every(Number.isInteger) || item.x < 0 || item.y < 0 || item.width < 1 || item.height < 1 || item.x + item.width > width || item.y + item.height > height)) throw new Error('图层分析返回了无效的元素范围，请重试。');
-      return value.objects;
+      const iterator = this.provider.run({ taskId: task.id, images: [source, guide, ...closeups], schema, prompt: `Separate the actual foreground product and independent decorative objects with closed, traceable silhouettes in this ${width}x${height} image into editable image layers. Image 1 is the untouched original. Image 2 has pixel-coordinate grid lines only for locating silhouettes; never treat its lines or labels as scene content. Coordinates start at the ORIGINAL image top-left (0,0), including all blank borders. Do not crop or renormalize coordinates to the photo content. Return ORIGINAL pixel bounding boxes and short Chinese names. Give repeated types distinct position-based names so a rejected object is unambiguous. The first object is the complete main product, including its full container and visible contents as one object. Do not split pieces inside the container or attached product parts into decorative layers. Every bounding box must include the complete visible silhouette, not only an interior detail or container rim. Each other object must be one independently visible element outside the main product; do not group scattered decorations or repeat an element already included in another object. A cup and a separate saucer are different physical objects. Each loose bean is a single complete bean: never cut a bean at a box edge or combine fragments of neighboring beans. Exclude text, backgrounds, gradients, shadows, reflections, floor patterns, ambient lighting and atmospheric effects: these remain part of the background scene. No invented objects, return only the actual independent elements rather than filling the count, maximum 8 objects.${correction ? ` The red numbered rectangles in image 2 are the previous bounding boxes, not physical contours. Check which visible pixels extend outside each box; expand incomplete boxes to include the whole visible object, without including a neighbor. The previous local segmentation rejected this analysis: ${JSON.stringify(correction)}. Additional images are enlarged coordinate closeups, in this order: ${details.map((detail, index) => `image ${index + 3}: previous object #${detail.index + 1}, ORIGINAL crop left=${detail.left}, top=${detail.top}, width=${detail.width}, height=${detail.height}`).join("; ")}. Closeup grid labels are ORIGINAL pixel coordinates, not display pixels. Read the complete silhouette boundaries from these labels; do not multiply returned coordinates by the display enlargement. This is one allowed correction, not a request to discard difficult objects. Inspect all original silhouettes again, correct incomplete or mixed bounding boxes, and return a complete valid object list. Do not preserve an incorrect box just to match the earlier list.` : ''}` })[Symbol.asyncIterator]();
+      const consume = (): Promise<ImageRegion[]> => iterator.next().then(event => {
+        if (signal.aborted) throw new Error('图层分析已停止。');
+        if (event.done) throw new Error('图层分析没有返回结果。');
+        if (event.value.type === 'failed') throw new Error(event.value.message);
+        if (event.value.type === 'cancelled') throw new Error('图层分析已停止。');
+        if (event.value.type !== 'completed') return consume();
+        const value = event.value.result as { objects: ImageRegion[] };
+        if (!value || Object.keys(value).length !== 1 || !Array.isArray(value.objects) || !value.objects.length || value.objects.length > 8 || value.objects.some(item => !item || Object.keys(item).length !== 5 || typeof item.name !== 'string' || !item.name.trim() || item.name.length > 100 || ![item.x, item.y, item.width, item.height].every(Number.isInteger) || item.x < 0 || item.y < 0 || item.width < 1 || item.height < 1 || item.x + item.width > width || item.y + item.height > height)) throw new Error('图层分析返回了无效的元素范围，请重试。');
+        return value.objects;
+      });
+      return consume().finally(() => iterator.return?.().then(() => {}));
     });
-    return consume().finally(() => iterator.return?.().then(() => {}));
   }
   private render(task: ImageToolTask, source: Buffer, signal: AbortSignal): Promise<LocalImageOutput> {
     const input = task.input; const asset = this.images.asset(input.sourceAssetId); const width = asset.width; const height = asset.height;
     const single = (data: Buffer, wide = width, tall = height): LocalImageOutput => ({ images: [{ data, width: wide, height: tall, name: names[input.operation] }], text: [] });
     if (input.operation === 'edit' || input.operation === 'erase' || input.operation === 'replace-text') {
-      const prompt = input.operation === 'edit' ? `Edit this image according to the following visual requirements: ${input.prompt}` : input.operation === 'erase' ? 'Remove the marked objects and naturally reconstruct the underlying scene. Do not replace them with other objects.' : `Replace the marked text with this exact text, preserving its style and perspective: ${input.text}`;
+      const prompt = input.operation === 'edit' ? `Edit this image according to the following visual requirements: ${input.prompt}` : input.operation === 'erase' ? 'Remove the marked objects and naturally reconstruct the underlying scene. Do not replace them with other objects.' : `Replace only the selected text with this exact text: ${input.text}. Preserve the original text color, font family, weight, size, position, baseline, spacing, perspective and surrounding background. Do not add a caption panel or recolor the text.`;
       return input.maskAssetId === null ? this.generate(task.id, source, prompt, width, height, signal).then(data => single(data)) : readFile(this.images.assetFile(input.maskAssetId)).then(mask => this.masked(task, source, mask, prompt, signal)).then(data => single(data));
     }
     if (input.operation === 'upscale') return this.generate(task.id, source, `Enhance this image to ${input.scale}x resolution. Recover realistic fine detail and reduce compression artifacts without altering any object, text, color or composition. Do not add content.`, width * input.scale, height * input.scale, signal).then(data => single(data, width * input.scale, height * input.scale));
     if (input.operation === 'expand') {
       return sharp({ create: { width: input.width, height: input.height, channels: 4, background: '#808080' } }).composite([{ input: source, left: input.x, top: input.y }]).png().toBuffer()
-        .then(guide => this.generate(task.id, guide, `Outpaint the grey empty area around the original image located at x=${input.x}, y=${input.y}, size ${width}x${height}. Extend the existing scene naturally. Keep original content unchanged. Visual requirements: ${input.prompt}`, input.width, input.height, signal))
+        /* 按示意中的原图位置扩展，避免模型缩放主体后与原图硬拼产生断裂。 */
+        .then(guide => this.generate(task.id, source, `Return one outpainted image of exactly ${input.width}x${input.height} pixels. Image 1 is the untouched original ${width}x${height} photograph. Image 2 is the target canvas layout: the original is placed at x=${input.x}, y=${input.y}, without scaling; only the grey area is new. Keep this placement and the original object scale, perspective, contours, lighting and texture exactly. Continue every cut object and surface across the original rectangle boundaries seamlessly. Do not zoom, shift, recreate, frame or stretch the original. No grey margins or rectangular seams. The original rectangle will be copied back unchanged, so the new pixels must meet its exact original edge positions and colors. Visual requirements: ${input.prompt}`, input.width, input.height, signal, guide))
         .then(data => sharp(data).composite([{ input: source, left: input.x, top: input.y }]).png().toBuffer()).then(data => single(data, input.width, input.height));
     }
-    const progress = (value: number) => { if (!signal.aborted && !this.stopped && this.task(task.id).status === 'running') this.update(task.id, 'running', Math.round(10 + value * .75)); };
+    /* 范围纠正会重新启动本地步骤，界面进度保留已到达的位置，避免倒退。 */
+    const progress = (value: number) => { if (signal.aborted || this.stopped) return; const current = this.task(task.id); if (current.status === 'running') this.update(task.id, 'running', Math.max(current.progress, Math.round(10 + value * .75))); };
     if (input.operation === 'recognize-text' || input.operation === 'cutout') return this.provider.processImage(task.id, source, { operation: input.operation }, signal, progress);
     /* 清字与像素处理在本地完成；拆层仅用一次模型分析语义分组，不再逐层调用生图生成蒙版。 */
     return this.provider.processImage(task.id, source, { operation: 'prepare-layers' }, signal, value => progress(Math.round(value * .3))).then(prepared => {
       const clean = prepared.images[0].data;
-      return this.objects(task, clean, signal).then(objects => this.provider.processImage(task.id, clean, { operation: 'split-layers', objects }, signal, value => progress(Math.round(35 + value * .65))))
+      return this.objects(task, clean, signal).then(objects => this.provider.processImage(task.id, clean, { operation: 'split-layers', objects }, signal, value => progress(Math.round(35 + value * .65)))
+        .catch((error: Error) => {
+          if (!(error instanceof LayerSegmentationError) || signal.aborted) throw error;
+          /* 只允许一次明确的语义范围纠正；再次失败不落结果，不无限重跑或切换生图。 */
+          return this.objects(task, clean, signal, { objects, name: error.layerName, message: error.message }).then(corrected => this.provider.processImage(task.id, clean, { operation: 'split-layers', objects: corrected }, signal, value => progress(Math.round(35 + value * .65))));
+        }))
         .then(output => ({ ...output, text: prepared.text }));
     });
   }

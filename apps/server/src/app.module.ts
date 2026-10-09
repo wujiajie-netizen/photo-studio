@@ -20,10 +20,12 @@ import { AgentExecutionService } from './agent-execution.service';
 import { AgentExecutionController } from './agent-execution.controller';
 import { ImageToolService } from './image-tool.service';
 import { ImageToolController } from './image-tool.controller';
+import { PresetsController } from './presets.controller';
+import { PresetsService } from './presets.service';
 
 @Module({
-  controllers: [AppController, ProjectsController, CodexController, AgentController, ProductImageController, CommerceController, EditorController, ImageEngineController, AgentExecutionController, ImageToolController],
-  providers: [StorageService, ProjectsService, AgentService, ProductImageService, CommerceService, EditorService, ImageEngineService, AgentExecutionService, ImageToolService, { provide: PRODUCT_IMAGE_TOOL, inject: [ImageEngineService], useFactory: (engine: ImageEngineService) => engine.render.bind(engine) }, {
+  controllers: [AppController, ProjectsController, CodexController, AgentController, ProductImageController, CommerceController, EditorController, ImageEngineController, AgentExecutionController, ImageToolController, PresetsController],
+  providers: [StorageService, ProjectsService, AgentService, ProductImageService, CommerceService, EditorService, ImageEngineService, AgentExecutionService, ImageToolService, PresetsService, { provide: PRODUCT_IMAGE_TOOL, inject: [ImageEngineService], useFactory: (engine: ImageEngineService) => engine.render.bind(engine) }, {
     provide: AGENT_MODEL_PROVIDER,
     inject: [StorageService],
     useFactory: (storage: StorageService) => new CodexCliProvider(resolve(storage.dataDirectory, 'runs'))

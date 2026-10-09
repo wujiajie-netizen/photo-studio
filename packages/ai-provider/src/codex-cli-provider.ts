@@ -17,7 +17,7 @@ export class CodexCliProvider implements AgentModelProvider {
 
   run(input: AgentInput): AsyncIterable<AgentEvent> { return this.start(input); }
   continue(sessionId: string, input: AgentInput): AsyncIterable<AgentEvent> { return this.start(input, sessionId); }
-  generateImage(taskId: string, source: Buffer | null, prompt: string, signal: AbortSignal): Promise<Buffer> { return this.images.generate(taskId, source, prompt, signal); }
+  generateImage(taskId: string, source: Buffer | null, prompt: string, signal: AbortSignal, guide?: Buffer): Promise<Buffer> { return this.images.generate(taskId, source, prompt, signal, guide); }
   processImage(taskId: string, source: Buffer, input: LocalImageInput, signal: AbortSignal, progress: (value: number) => void): Promise<LocalImageOutput> { return this.localImages.run(taskId, source, input, signal, progress); }
   cancel(taskId: string): Promise<void> {
     this.preparing.get(taskId)?.();

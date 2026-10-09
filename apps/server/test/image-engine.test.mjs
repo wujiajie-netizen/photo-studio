@@ -39,3 +39,18 @@ test('all scenes use the Codex provider, output fits requested dimensions and ca
     mode = 'quota'; return assert.rejects(engine.render(picture, parameters, 0, new AbortController().signal), /额度/);
   }).then(() => { assert.equal(callbacks.length, 1); return callbacks[0](); });
 });
+
+test('commerce generation receives platform, region, all facts, module role and one brand snapshot', () => {
+  const calls = []; let picture;
+  const engine = new ImageEngineService({ beforeClose: [] }, { generateImage(id, source, prompt) { calls.push(prompt); return Promise.resolve(picture); } });
+  const parameters = { sourceAssetId: null, subject: 'keep', scene: 'warm', description: 'confirmed module facts', ratio: '1:1', count: 1, quality: 'standard' };
+  const commerce = { sourceAssetId: null, subject: 'keep', scene: 'warm', ratio: '1:1', quality: 'standard', productName: '商品名称', platform: 'amazon', region: 'US', language: 'en-US', sellingPoints: Array.from({ length: 8 }, (_, index) => `${index}: ${'已确认卖点'.repeat(35)}`), sections: [{ type: 'hero', title: 'Main', content: '包装' }, { type: 'specification', title: 'Specification', content: '净重 200 g' }], brand: { fontFamily: 'Arial', primaryColor: '#123456', textColor: '#654321', backgroundColor: '#abcdef', styleDescription: 'Consistent warm studio lighting' } };
+  return sharp({ create: { width: 32, height: 32, channels: 4, background: '#ffffff' } }).png().toBuffer().then(data => {
+    picture = data; return engine.render(null, parameters, 0, new AbortController().signal, { parameters: commerce, sectionIndex: 0 });
+  }).then(() => engine.render(null, parameters, 0, new AbortController().signal, { parameters: commerce, sectionIndex: 1 })).then(() => {
+    assert.equal(calls.length, 2); assert.match(calls[0], /Current module role: hero/); assert.match(calls[1], /Current module role: specification/);
+    for (const prompt of calls) {
+      assert.ok(prompt.includes(JSON.stringify(commerce))); assert.match(prompt, /Apply the confirmed brand/); assert.match(prompt, /one coherent ecommerce series/); assert.match(prompt, /do not draw them into the generated photo/);
+    }
+  }).finally(() => engine.onApplicationShutdown());
+});

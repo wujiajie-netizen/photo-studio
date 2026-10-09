@@ -5,12 +5,13 @@ import { resolve } from 'node:path';
 import { Subject } from 'rxjs';
 import sharp from 'sharp';
 import { zipSync } from 'fflate';
-import { COMMERCE_COPY_SCHEMA, validateCommerceParameters, type CommerceCopy, type CommerceKind, type CommerceParameters, type CommerceTask, type ProductImageResult } from '@photo-studio/shared';
-import { renderCommerceImage, type renderMockProductImage } from '@photo-studio/tools';
+import { COMMERCE_COPY_SCHEMA, validateCommerceParameters, validateEditorContent, type CommerceCopy, type CommerceKind, type CommerceParameters, type CommerceTask, type ProductImageResult } from '@photo-studio/shared';
+import { renderCommerceImage, type CommerceImageRenderer } from '@photo-studio/tools';
 import { ImageGenerationError, type AgentModelProvider } from '@photo-studio/ai-provider';
 import { StorageService } from './storage.service';
 import { PRODUCT_IMAGE_TOOL, ProductImageService } from './product-image.service';
 import { AGENT_MODEL_PROVIDER } from './agent.service';
+import { EditorService } from './editor.service';
 
 const columns = 'id, kind, parameters, status, progress, items, created_at AS createdAt, updated_at AS updatedAt, error';
 const resultColumns = 'id, task_id AS taskId, name, width, height, created_at AS createdAt, project_id AS projectId';
@@ -24,7 +25,7 @@ export class CommerceService {
   private stopped = false;
   private readonly copyCalls = new Set<string>();
 
-  constructor(@Inject(StorageService) private readonly storage: StorageService, @Inject(ProductImageService) private readonly images: ProductImageService, @Inject(PRODUCT_IMAGE_TOOL) private readonly render: typeof renderMockProductImage, @Inject(AGENT_MODEL_PROVIDER) private readonly provider: AgentModelProvider) {
+  constructor(@Inject(StorageService) private readonly storage: StorageService, @Inject(ProductImageService) private readonly images: ProductImageService, @Inject(PRODUCT_IMAGE_TOOL) private readonly render: CommerceImageRenderer, @Inject(AGENT_MODEL_PROVIDER) private readonly provider: AgentModelProvider, @Inject(EditorService) private readonly editor: EditorService) {
     storage.beforeClose.push(() => this.onApplicationShutdown());
     /* 重启保留成功项，只把未完成的项标记中断，用户重试时不用重新生成已完成图片。 */
     for (const task of this.list().filter((value) => ['queued', 'running'].includes(value.status))) {
@@ -100,13 +101,21 @@ export class CommerceService {
         for (const item of task.items.filter((value) => value.status === 'queued')) {
           steps = steps.then(() => {
             check(); item.status = 'running'; this.persist(task);
-            return renderCommerceImage(input, task.parameters, item.index, signal.signal, this.render)
-              .then(({ data, width, height }) => {
-                check(); const result: ProductImageResult = { id: randomUUID(), taskId: id, name: `${item.index + 1}_${item.title}.png`, width, height, createdAt: new Date().toISOString(), projectId: null };
+            const resultId = randomUUID();
+            return renderCommerceImage(input, task.parameters, item.index, signal.signal, this.render, resultId)
+              .then(({ data, width, height, background, layers }) => {
+                check(); const result: ProductImageResult = { id: resultId, taskId: id, name: `${item.index + 1}_${item.title}.png`, width, height, createdAt: new Date().toISOString(), projectId: null };
+                validateEditorContent({ name: result.name, width, height, background, layers });
                 const path = resolve(this.storage.dataDirectory, 'generated', `${result.id}.png`);
                 return writeFile(path, data).then(() => {
                   if (signal.signal.aborted || this.stopped) return unlink(path).then(check);
-                  this.storage.database.prepare('INSERT INTO commerce_results VALUES (?, ?, ?, ?, ?, ?, ?)').run(result.id, id, result.name, width, height, result.createdAt, null);
+                  /* 结果与可编辑排版一同落库，重启或打开作品不会丢失独立文字。 */
+                  this.storage.database.exec('BEGIN');
+                  try {
+                    this.storage.database.prepare('INSERT INTO commerce_results VALUES (?, ?, ?, ?, ?, ?, ?)').run(result.id, id, result.name, width, height, result.createdAt, null);
+                    this.storage.database.prepare('INSERT INTO editor_documents VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(randomUUID(), result.id, null, result.name, width, height, background, JSON.stringify(layers), 0, result.createdAt, result.createdAt);
+                    this.storage.database.exec('COMMIT');
+                  } catch (error) { this.storage.database.exec('ROLLBACK'); throw error; }
                   item.status = 'succeeded'; item.resultId = result.id; item.error = null;
                 });
               }).catch((error: Error) => { if (signal.signal.aborted || this.stopped) throw error; item.status = 'failed'; item.error = error instanceof ImageGenerationError ? error.message : '该模块生成失败，可以单独重试。'; })
@@ -124,12 +133,16 @@ export class CommerceService {
   export(id: string, format: 'zip' | 'long'): Promise<Buffer> {
     const task = this.task(id);
     if (task.status !== 'succeeded' || !task.items.every((item) => item.resultId)) throw new ConflictException('请先完成所有模块，再导出整套作品。');
-    return Promise.all(task.items.map((item) => readFile(this.images.resultFile(item.resultId!)))).then((files) => {
+    const documents = task.items.map(item => this.editor.open(item.resultId!));
+    const width = Math.max(...documents.map(document => document.width));
+    const height = documents.reduce((sum, document) => sum + document.height, 0);
+    if (format === 'long' && width * height > 40_000_000) throw new BadRequestException('长图超过 4000 万像素，请减少模块或改用标准质量。');
+    /* 串行渲染最近保存的文档，限制高清多模块同时占用画布内存。 */
+    const files: Buffer[] = []; let rendering: Promise<void> = Promise.resolve();
+    for (const document of documents) rendering = rendering.then(() => this.editor.exportDocument(document)).then(result => { files.push(result.data); });
+    return rendering.then(() => {
       if (format === 'zip') return Buffer.from(zipSync(Object.fromEntries(files.map((file, index) => [`${index + 1}.png`, file])), { level: 0 }));
-      const results = task.items.map((item) => this.images.result(item.resultId!));
-      const width = results[0].width; const height = results.reduce((sum, result) => sum + result.height, 0);
-      if (width * height > 40_000_000) throw new BadRequestException('长图超过 4000 万像素，请减少模块或改用标准质量。');
-      let top = 0; const layers = files.map((input, index) => { const overlay = { input, top, left: 0 }; top += results[index].height; return overlay; });
+      let top = 0; const layers = files.map((input, index) => { const overlay = { input, top, left: Math.floor((width - documents[index].width) / 2) }; top += documents[index].height; return overlay; });
       return sharp({ create: { width, height, channels: 4, background: '#ffffff' } }).composite(layers).png().toBuffer();
     });
   }

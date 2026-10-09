@@ -2,17 +2,20 @@
 import { computed, onBeforeUnmount, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { ArrowLeft, ImagePlus, Plus, Trash2, ArrowUp, ArrowDown } from '@lucide/vue';
-import { PRODUCT_UPLOAD_LIMIT, validateCommerceParameters, type CommerceCopy, type CommerceKind, type CommerceParameters, type CommerceTask, type ProductAsset, type ProductImageResult } from '@photo-studio/shared';
+import { PRODUCT_UPLOAD_LIMIT, validateCommerceParameters, type CreationPreset, type CommerceCopy, type CommerceKind, type CommerceParameters, type CommerceTask, type ProductAsset, type ProductImageResult } from '@photo-studio/shared';
 import { request } from '../api';
 import { useCommerceStore } from '../stores/commerce';
 import ProductResultCards from '../components/ProductResultCards.vue';
 import SaveResultDialog from '../components/SaveResultDialog.vue';
+import CreationPresetPanel from '../components/CreationPresetPanel.vue';
+import BrandPresetPicker from '../components/BrandPresetPicker.vue';
 
 const route = useRoute(); const router = useRouter(); const store = useCommerceStore();
 const kind = computed(() => route.path.slice(1) as CommerceKind);
 const title = computed(() => kind.value === 'product-kit' ? '商品套图' : '商品详情页');
 const parameters = ref<CommerceParameters>({ sourceAssetId: '', subject: 'trim', scene: 'white', ratio: '1:1', quality: 'standard', productName: '', platform: 'general', region: 'CN', language: 'zh-CN', sellingPoints: [], sections: [] });
 const sellingPoints = ref('');
+const presetParameters = computed(() => ({ ...parameters.value, sellingPoints: sellingPoints.value.split('\n').map(line => line.trim()).filter(Boolean) }));
 const uploading = ref(false); const submitting = ref(false); const assisting = ref(false);
 const saving = ref<ProductImageResult | null>(null); const notice = ref('');
 let copySignal: AbortController | null = null; let version = 0;
@@ -24,6 +27,19 @@ const date = new Intl.DateTimeFormat('zh-CN', { month: '2-digit', day: '2-digit'
 function reset() {
   parameters.value = { sourceAssetId: '', subject: 'trim', scene: 'white', ratio: kind.value === 'detail-page' ? '3:4' : '1:1', quality: 'standard', productName: '', platform: 'general', region: 'CN', language: 'zh-CN', sellingPoints: [], sections: [{ type: 'hero', title: '商品展示', content: '' }, { type: 'features', title: '核心卖点', content: '' }, { type: 'usage', title: '使用场景', content: '' }] };
   sellingPoints.value = '';
+}
+function applyPreset(preset: CreationPreset, restoreCopy: boolean) {
+  if (preset.kind !== kind.value) return;
+  const current = parameters.value;
+  /* 默认按模块类型复用当前商品文案；新增模块只带结构，避免带入旧商品事实。 */
+  const remaining = [...current.sections];
+  const sections = restoreCopy ? preset.parameters.sections : preset.parameters.sections.map(section => {
+    const index = remaining.findIndex(item => item.type === section.type);
+    return index === -1 ? { type: section.type, title: sectionLabels[section.type], content: '' } : remaining.splice(index, 1)[0];
+  });
+  parameters.value = { ...preset.parameters, sourceAssetId: current.sourceAssetId, productName: restoreCopy ? preset.parameters.productName : current.productName, sellingPoints: restoreCopy ? preset.parameters.sellingPoints : current.sellingPoints, sections };
+  if (restoreCopy) sellingPoints.value = preset.parameters.sellingPoints.join('\n');
+  notice.value = '方案已应用，请核对商品信息和各模块文案，再点击生成。';
 }
 function upload(event: Event) {
   const input = event.target as HTMLInputElement; const file = input.files?.[0];
@@ -102,6 +118,7 @@ onBeforeUnmount(() => { ++version; copySignal?.abort(); store.disconnect(); });
         <h2>商品与规格</h2>
         <fieldset :disabled="store.busy || submitting || uploading || assisting || store.loading">
           <legend>素材和内容</legend>
+          <CreationPresetPanel :kind="kind" :parameters="presetParameters" :disabled="store.busy || submitting || uploading || assisting || store.loading" @apply="applyPreset" />
           <img v-if="parameters.sourceAssetId" class="source" :src="`/api/assets/${parameters.sourceAssetId}/file`" alt="商品原图" />
           <label class="upload"><ImagePlus :size="18" /> {{ uploading ? '上传中…' : '上传商品原图' }}<input type="file" accept="image/jpeg,image/png,image/webp" aria-label="上传商品原图" @change="upload" /></label>
           <p class="help">静态 JPG / PNG / WebP，20 MB 以内、1600 万像素以内。</p>
@@ -111,6 +128,7 @@ onBeforeUnmount(() => { ++version; copySignal?.abort(); store.disconnect(); });
           <div class="paired"><label class="field">语言<select v-model="parameters.language"><option value="zh-CN">中文</option><option value="en-US">英文</option><option value="ja-JP">日文</option><option value="de-DE">德文</option></select></label><label class="field">比例<select v-model="parameters.ratio"><option>1:1</option><option>3:4</option><option>4:3</option><option>9:16</option></select></label></div>
           <div class="paired"><label class="field">主体处理<select v-model="parameters.subject"><option value="keep">保留原图</option><option value="trim">裁去空白边缘</option></select></label><label class="field">背景<select v-model="parameters.scene"><option value="white">白底</option><option value="warm">暖色</option><option value="cool">冷色</option></select></label></div>
           <label class="field">质量<select v-model="parameters.quality"><option value="standard">标准 · 长边 1024</option><option value="high">高清 · 长边 2048</option></select></label>
+          <BrandPresetPicker :key="`${kind}-${route.query.task ?? 'new'}`" :model-value="parameters.brand ?? null" :disabled="store.busy || submitting || uploading || assisting || store.loading" @update:model-value="parameters.brand = $event" />
           <label class="field">商品卖点<textarea v-model="sellingPoints" rows="4" placeholder="每行一条，最多 8 条；只填写已确认的信息" /></label>
           <button type="button" class="button secondary" @click="assist">让 Codex 整理文案</button>
           <h2 class="module-heading">{{ kind === 'product-kit' ? '套图结构' : '详情模块' }}</h2>
@@ -122,7 +140,7 @@ onBeforeUnmount(() => { ++version; copySignal?.abort(); store.disconnect(); });
           </article>
           <button type="button" class="button secondary" :disabled="parameters.sections.length >= 8" @click="add"><Plus :size="14" /> 添加模块</button>
         </fieldset>
-        <p class="help">Codex 生成商品画面，模块文案按确认内容排版。平台与地区保存为上架要求，尺寸以所选比例为准；请核对文案、商品外观和包装文字。</p>
+        <p class="help">Codex 按商品、平台、地区与品牌风格生成统一画面，模块文案按确认内容排版并保留为可编辑文字；请核对商品外观、文案和包装文字。</p>
         <button v-if="assisting" class="button secondary" type="button" @click="copySignal?.abort()">取消文案整理</button>
         <button class="button generate" type="submit" :disabled="!parameters.sourceAssetId || !parameters.productName.trim() || store.busy || submitting || uploading || assisting || store.loading">{{ assisting ? '正在整理文案…' : submitting ? '提交中…' : store.busy ? '正在生成…' : `生成${title}` }}</button>
       </form>
@@ -133,7 +151,7 @@ onBeforeUnmount(() => { ++version; copySignal?.abort(); store.disconnect(); });
         <div v-if="store.task?.status === 'succeeded'" class="export-actions"><a class="button secondary" :href="`/api/commerce/tasks/${store.task.id}/export?format=zip`" download>整套下载 ZIP</a><a v-if="kind === 'detail-page'" class="button" :href="`/api/commerce/tasks/${store.task.id}/export?format=long`" download>下载详情长图</a></div>
         <div v-if="store.loading" class="empty-state"><p>正在读取历史任务…</p></div>
         <ProductResultCards v-else-if="currentResults.length" :results="currentResults" actions :busy="store.busy || submitting" @save="saving = $event" @retry="retryResult" />
-        <div v-else class="empty-state"><ImagePlus :size="40" :stroke-width="1" /><h3>{{ store.busy ? '正在生成图片模块' : '先配置商品与模块' }}</h3><p>每张图片独立显示进度，可单独重试、保存、编辑和下载。</p></div>
+        <div v-else class="empty-state result-empty"><div v-if="!store.busy" class="collection-preview" :class="{ 'detail-preview': kind === 'detail-page' }" aria-label="商品视觉风格参考"><img src="/images/studio-coffee.webp" alt="咖啡品牌包装套图参考" /><img src="/images/studio-travel.webp" alt="商品卖点与场景布局参考" /><img src="/images/studio-outdoor.webp" alt="户外生活场景参考" /></div><ImagePlus v-else :size="40" :stroke-width="1" /><span v-if="!store.busy" class="preview-label">{{ kind === 'product-kit' ? '统一视觉，完整表达 · 风格参考' : '从卖点到购买理由 · 布局参考' }}</span><h3>{{ store.busy ? '正在生成图片模块' : kind === 'product-kit' ? '让好设计，贯穿每一张图' : '一个个卖点，一步步打动' }}</h3><p>在左侧配置商品与模块，每张图片都可独立保存、编辑和下载。</p><span class="empty-workflow">商品信息 <span>→</span> 规划模块 <span>→</span> 整套生成</span></div>
       </section>
     </div>
     <SaveResultDialog v-if="saving" :result="saving" @close="saving = null" @saved="saved" />
@@ -141,14 +159,14 @@ onBeforeUnmount(() => { ++version; copySignal?.abort(); store.disconnect(); });
 </template>
 
 <style scoped lang="scss">
-.commerce-page { padding: 24px 32px 48px; max-width: 1600px; margin: 0 auto; }
-.workflow-heading { margin-bottom: 26px; h1 { font-size: 26px; margin-top: 12px; } p { color: var(--muted); font-size: 13px; margin-top: 6px; } .back { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); } }
+.commerce-page { padding: 28px 36px 48px; max-width: 1600px; margin: 0 auto; animation: page-appear .45s ease both; }
+.workflow-heading { margin-bottom: 28px; padding: 22px 28px; background: radial-gradient(ellipse at 100% 0, #e8defa, transparent 60%), #f3effb; border: 1px solid #e8e1f5; border-radius: 20px; h1 { font-size: 28px; font-weight: 650; margin-top: 12px; letter-spacing: -.5px; } p { color: var(--text-secondary); font-size: 13px; margin-top: 6px; } .back { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: #9582ad; &:hover { color: var(--accent); } } }
 .workflow-layout { display: grid; grid-template-columns: 360px minmax(0, 1fr); gap: 28px; align-items: start; }
 .configuration {
-  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 24px;
-  h2 { font-size: 17px; margin-bottom: 20px; } fieldset { border: 0; padding: 0 4px 0 0; margin: 0; min-width: 0; max-height: calc(100vh - 445px); min-height: 240px; overflow-y: auto; } legend { font-size: 12px; }
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 24px; box-shadow: var(--shadow);
+  h2 { font-size: 17px; margin-bottom: 20px; } fieldset { border: 0; padding: 0 4px 0 0; margin: 0; min-width: 0; max-height: calc(100dvh - 560px); min-height: 240px; overflow-y: auto; } legend { font-size: 12px; }
   .source { display: block; width: 100%; height: 120px; object-fit: contain; background: var(--page); margin: 8px 0 12px; }
-  .upload { display: flex; align-items: center; justify-content: center; gap: 8px; padding: 18px; border: 1px dashed var(--border-strong); border-radius: var(--radius-sm); position: relative; }
+  .upload { display: flex; align-items: center; justify-content: center; gap: 8px; padding: 24px 18px; color: var(--accent); background: #fcfaff; border: 1px dashed #c9b7ef; border-radius: var(--radius-sm); position: relative; transition: background .2s; &:hover { background: var(--accent-soft); } }
   .upload input { position: absolute; inset: 0; width: 100%; opacity: 0; cursor: pointer; }
   .field { display: grid; gap: 6px; margin-top: 14px; font-size: 12px; }
   select, input, textarea { min-width: 0; width: 100%; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); font: inherit; background: var(--surface); color: var(--text); }
@@ -162,6 +180,12 @@ onBeforeUnmount(() => { ++version; copySignal?.abort(); store.disconnect(); });
 .task-status { padding: 16px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); margin-bottom: 20px; header { display: flex; justify-content: space-between; font-size: 12px; } button { border: 0; background: transparent; text-decoration: underline; font-size: 12px; } progress { display: block; width: 100%; height: 6px; accent-color: var(--text); margin-top: 12px; } ul { list-style: none; padding: 0; margin: 14px 0 0; } li { display: flex; gap: 12px; flex-wrap: wrap; padding: 7px 0; font-size: 12px; border-top: 1px solid var(--border); } small { color: var(--error); flex-basis: 100%; } }
 .export-actions { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 20px; }
 .error { color: var(--error); font-size: 12px; margin-bottom: 16px; }.notice { color: var(--success); font-size: 12px; margin-bottom: 16px; }
+.result-empty { min-height: 500px; border-style: solid; background: radial-gradient(ellipse at 50% 10%, #f0eafb, transparent 65%), #fff; }
+.collection-preview { display: flex; align-items: center; justify-content: center; gap: 10px; padding: 8px 0 28px; img { width: 112px; height: 158px; display: block; border: 5px solid white; border-radius: 10px; object-fit: cover; box-shadow: 0 12px 28px rgb(59 38 102 / 12%); transition: transform .3s; &:nth-child(2) { transform: translateY(-16px); } &:hover { transform: translateY(-22px); } } }
+.detail-preview { gap: 0; img { border-radius: 4px; &:first-child { transform: rotate(-6deg) translateY(12px); } &:last-child { transform: rotate(6deg) translateY(12px); } } }
+.preview-label { color: #9a88b6; font-size: 10px; letter-spacing: 2px; }
+.empty-workflow { display: inline-flex; align-items: center; gap: 14px; margin-top: 24px; padding: 8px 16px; border-radius: 30px; background: #f8f6fc; font-size: 10px; color: var(--text-secondary); > span { color: #baa6df; } }
+@media (max-width: 1100px) { .collection-preview { gap: 6px; img { width: 84px; height: 120px; } } .result-empty { padding-inline: 18px; } .empty-workflow { gap: 8px; padding-inline: 10px; } }
 @media (max-width: 1000px) { .workflow-layout { grid-template-columns: 300px minmax(0, 1fr); gap: 20px; } .configuration { padding: 18px; } .result-heading { flex-wrap: wrap; } }
 @media (max-width: 760px) { .commerce-page { padding-inline: 20px; } .workflow-layout { grid-template-columns: 1fr; } .configuration fieldset { max-height: none; } }
 </style>

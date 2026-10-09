@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { test } from 'node:test';
 import sharp from 'sharp';
-import { prepareProductImage, renderMockProductImage } from '../dist/index.js';
+import { prepareProductImage, renderMockProductImage, renderCommerceImage } from '../dist/index.js';
+import { validateEditorContent } from '@photo-studio/shared';
 
 test('upload checks decoded formats, dimensions and EXIF orientation', () => {
   return sharp({ create: { width: 60, height: 40, channels: 3, background: '#aa4433' } }).jpeg().withMetadata({ orientation: 6 }).toBuffer()
@@ -45,4 +46,19 @@ test('mock tool outputs actual PNG backgrounds and ratio sizes, trims margins an
       const controller = new AbortController(); controller.abort();
       return assert.rejects(renderMockProductImage(source, parameters, 0, controller.signal), /取消/);
     });
+});
+
+test('commerce preserves original bitmap, creates editable text and passes every confirmed fact without truncation', () => {
+  const resultId = randomUUID(); let original;
+  const parameters = { sourceAssetId: null, subject: 'keep', scene: 'warm', ratio: '3:4', quality: 'standard', productName: '咖啡', platform: 'amazon', region: 'US', language: 'en-US', sellingPoints: Array(8).fill('已确认事实'.repeat(35)), sections: [{ type: 'features', title: 'Editable title', content: '商品文案'.repeat(150) }], brand: { fontFamily: 'Arial', primaryColor: '#123456', textColor: '#654321', backgroundColor: '#abcdef', styleDescription: 'Warm coherent studio lighting' } };
+  const render = (input, imageParameters, index, signal, context) => {
+    assert.equal(input, null); assert.deepEqual(context, { parameters, sectionIndex: 0 }); assert.equal(imageParameters.description, parameters.sections[0].content);
+    return sharp({ create: { width: 768, height: 1024, channels: 4, background: '#eeddcc' } }).png().toBuffer().then(data => { original = data; return { data, width: 768, height: 1024 }; });
+  };
+  return renderCommerceImage(null, parameters, 0, new AbortController().signal, render, resultId).then(image => {
+    assert.deepEqual(image.data, original); assert.equal(image.background, '#abcdef');
+    assert.equal(image.layers[0].resultId, resultId); assert.equal(image.layers[1].text, parameters.sections[0].title); assert.equal(image.layers[2].text, parameters.sections[0].content);
+    assert.equal(image.layers[1].fontFamily, 'Arial'); assert.equal(image.layers[1].fill, '#123456'); assert.equal(image.layers[2].fill, '#654321');
+    validateEditorContent({ name: 'Commerce', width: image.width, height: image.height, background: image.background, layers: image.layers });
+  });
 });

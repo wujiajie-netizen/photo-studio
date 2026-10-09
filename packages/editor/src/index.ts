@@ -1,5 +1,6 @@
 import Konva from 'konva';
 import type { EditorContent, EditorLayer } from '@photo-studio/shared';
+import { createEditorNode } from './render.js';
 
 export class ProductCanvas {
   private readonly stage: Konva.Stage;
@@ -37,31 +38,8 @@ export class ProductCanvas {
       this.transformer.nodes([]); this.transformer.remove(); this.layer.destroyChildren();
       this.layer.add(new Konva.Rect({ id: 'canvas-background', width: content.width, height: content.height, fill: content.background }));
       for (const item of content.layers) {
-        const config = { ...item, draggable: interactive && !item.locked, listening: interactive && item.visible, id: item.id };
-        let node: Konva.Shape;
-        if (item.type === 'image' || item.type === 'asset-image') {
-          node = new Konva.Image({ ...config, image: this.images.get(item.type === 'image' ? `result:${item.resultId}` : `asset:${item.assetId}`)! });
-          if (item.adjustments) {
-            node.cache(); node.filters([Konva.Filters.Brighten, Konva.Filters.Contrast, Konva.Filters.HSL, Konva.Filters.Blur]);
-            node.brightness(item.adjustments.brightness); node.contrast(item.adjustments.contrast); node.saturation(item.adjustments.saturation); node.blurRadius(item.adjustments.blur);
-          }
-        }
-        else if (item.type === 'text') node = new Konva.Text({ ...config, text: item.text, fontSize: item.fontSize, fontFamily: item.fontFamily, fill: item.fill, align: item.align, wrap: 'word' });
-        else if (item.type === 'path') {
-          const wide = Math.max(1, ...item.points.filter((_, index) => index % 2 === 0)); const tall = Math.max(1, ...item.points.filter((_, index) => index % 2 === 1));
-          node = new Konva.Line({ ...config, points: item.points.map((point, index) => point * (index % 2 ? item.height / tall : item.width / wide)), stroke: item.stroke, strokeWidth: item.strokeWidth, lineCap: 'round', lineJoin: 'round', hitStrokeWidth: Math.max(12, item.strokeWidth) });
-        } else {
-          /* 用左上角和宽高绘制形状，沿用图片图层的变换、选择与持久化坐标。 */
-          node = new Konva.Shape({ ...config, fill: item.fill, stroke: item.stroke, strokeWidth: item.strokeWidth, sceneFunc(context, shape) {
-            const width = shape.width(); const height = shape.height(); context.beginPath();
-            if (item.shape === 'rectangle') context.rect(0, 0, width, height);
-            else if (item.shape === 'ellipse') context.ellipse(width / 2, height / 2, width / 2, height / 2, 0, 0, Math.PI * 2);
-            else if (item.shape === 'triangle') { context.moveTo(width / 2, 0); context.lineTo(width, height); context.lineTo(0, height); context.closePath(); }
-            else if (item.shape === 'star') { for (let index = 0; index < 10; index++) { const angle = index * Math.PI / 5 - Math.PI / 2; const radius = index % 2 ? .22 : .5; const x = width / 2 + Math.cos(angle) * width * radius; const y = height / 2 + Math.sin(angle) * height * radius; if (!index) context.moveTo(x, y); else context.lineTo(x, y); } context.closePath(); }
-            else { context.moveTo(0, height / 2); context.lineTo(width, height / 2); if (item.shape === 'arrow') { context.moveTo(width * .8, height * .2); context.lineTo(width, height / 2); context.lineTo(width * .8, height * .8); } }
-            context.fillStrokeShape(shape);
-          } });
-        }
+        const image = item.type === 'image' ? this.images.get(`result:${item.resultId}`) : item.type === 'asset-image' ? this.images.get(`asset:${item.assetId}`) : undefined;
+        const node = createEditorNode(item, image, interactive);
         node.on('dragend transformend', () => {
           const width = Math.max(1, node.width() * node.scaleX()); const height = Math.max(1, node.height() * node.scaleY());
           node.scale({ x: 1, y: 1 }); node.size({ width, height });
@@ -78,7 +56,7 @@ export class ProductCanvas {
     const node = id ? this.layer.findOne(`#${id}`) : null;
     this.transformer.nodes(node && item?.visible && !item.locked ? [node] : []); this.layer.batchDraw();
   }
-  export(format: 'png' | 'jpeg' = 'png', multiplier = 1): Promise<Blob> {
+  export(format: 'png' | 'jpeg' = 'png', multiplier = 1, quality = .92): Promise<Blob> {
     const selected = this.selected; this.transformer.nodes([]); this.layer.draw();
     /* 按文档尺寸导出，避免预览缩放的浮点误差少一行像素；处理工具必须拿到完整原尺寸。 */
     let picture: HTMLCanvasElement;
@@ -88,7 +66,7 @@ export class ProductCanvas {
     } finally { this.stage.scale({ x: this.scale, y: this.scale }); this.select(selected); }
     /* JPEG 没有透明通道，导出时铺白底；画布文档与 PNG 的透明背景保持原样。 */
     if (format === 'jpeg') { const context = picture.getContext('2d')!; context.globalCompositeOperation = 'destination-over'; context.fillStyle = '#ffffff'; context.fillRect(0, 0, picture.width, picture.height); }
-    return new Promise<Blob | null>(resolve => picture.toBlob(resolve, `image/${format}`, .92)).then((blob) => {
+    return new Promise<Blob | null>(resolve => picture.toBlob(resolve, `image/${format}`, quality)).then((blob) => {
       if (!blob) throw new Error('无法导出画布，请重试。'); return blob;
     });
   }

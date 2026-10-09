@@ -2,10 +2,11 @@
 import { computed, onBeforeUnmount, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { ArrowLeft, ImagePlus } from '@lucide/vue';
-import { PRODUCT_UPLOAD_LIMIT, validateProductImageParameters, type ProductImageParameters, type ProductImageResult, type ProductImageTask } from '@photo-studio/shared';
+import { PRODUCT_UPLOAD_LIMIT, validateProductImageParameters, type CreationPreset, type ProductImageParameters, type ProductImageResult, type ProductImageTask } from '@photo-studio/shared';
 import { useProductImageStore } from '../stores/product-image';
 import ProductResultCards from '../components/ProductResultCards.vue';
 import SaveResultDialog from '../components/SaveResultDialog.vue';
+import CreationPresetPanel from '../components/CreationPresetPanel.vue';
 
 const store = useProductImageStore();
 const route = useRoute();
@@ -29,6 +30,11 @@ function upload(event: Event) {
     .catch((failure: Error) => { store.error = failure.message; }).finally(() => { uploading.value = false; input.value = ''; });
 }
 function open(task: ProductImageTask) { return router.push({ path: '/product-image', query: { task: task.id } }); }
+function applyPreset(preset: CreationPreset, restoreCopy: boolean) {
+  if (preset.kind !== 'product-image') return;
+  parameters.value = { ...preset.parameters, sourceAssetId: parameters.value.sourceAssetId, description: restoreCopy ? preset.parameters.description : parameters.value.description };
+  notice.value = '方案已应用，请核对当前商品与设置，再点击生成。';
+}
 function generate() {
   if (store.busy || uploading.value) return;
   store.error = ''; notice.value = '';
@@ -66,6 +72,7 @@ onBeforeUnmount(() => store.disconnect());
         <h2>生成设置</h2>
         <fieldset :disabled="store.loading || store.busy || uploading">
           <legend>商品原图</legend>
+          <CreationPresetPanel kind="product-image" :parameters="parameters" :disabled="store.loading || store.busy || uploading" @apply="applyPreset" />
           <div v-if="store.source" class="source-preview"><img :src="`/api/assets/${store.source.id}/file`" :alt="store.source.name" /><p>{{ store.source.name }} · {{ store.source.width }} × {{ store.source.height }}</p></div>
           <label class="upload"><ImagePlus :size="22" /><span>{{ uploading ? '正在上传…' : store.source ? '更换商品原图' : '上传商品原图' }}</span><input type="file" accept="image/jpeg,image/png,image/webp" aria-label="上传商品原图" @change="upload" /></label>
           <p class="help">JPG / PNG / WebP，单张不超过 20 MB、1600 万像素。</p>
@@ -87,7 +94,7 @@ onBeforeUnmount(() => store.disconnect());
         <div v-if="store.task" class="task-status" role="status"><div><span>{{ status }} · {{ store.task.progress }}%</span><button v-if="store.busy" type="button" @click="store.cancel">取消任务</button><button v-else-if="['failed', 'cancelled'].includes(store.task.status)" type="button" @click="retry()">重试任务</button></div><progress :value="store.task.progress" max="100" :aria-label="status" /><p v-if="store.task.error" class="error">{{ store.task.error }}</p></div>
         <div v-if="store.loading" class="empty-state"><p>正在读取任务…</p></div>
         <ProductResultCards v-else-if="store.results.length" :results="store.results" actions :busy="store.busy" @save="saving = $event" @retry="retry" />
-        <div v-else class="empty-state"><ImagePlus :size="40" :stroke-width="1" /><h3>{{ store.busy ? '正在制作商品展示图' : '从一张商品原图开始' }}</h3><p>{{ store.busy ? '生成结果会随任务进度自动显示。' : '生成后可预览、重新生成、保存到项目并下载 PNG。' }}</p></div>
+        <div v-else class="empty-state result-empty"><div v-if="!store.busy" class="preview-stack" aria-label="商品图风格参考"><img src="/images/studio-fashion.webp" alt="简约服饰商品图参考" /><img src="/images/studio-tech.webp" alt="数码商品场景图参考" /><img src="/images/studio-home.webp" alt="自然光家居场景参考" /></div><ImagePlus v-else :size="40" :stroke-width="1" /><span v-if="!store.busy" class="preview-label">从灵感到作品 · 风格参考</span><h3>{{ store.busy ? '正在制作商品展示图' : '下一张好图，从你的商品开始' }}</h3><p>{{ store.busy ? '生成结果会随任务进度自动显示。' : '在左侧上传原图、选择场景，把商品带入全新的视觉故事。' }}</p><span class="empty-workflow">上传商品 <span>→</span> 设置场景 <span>→</span> 生成与编辑</span></div>
       </section>
     </div>
     <SaveResultDialog v-if="saving" :result="saving" @close="saving = null" @saved="saved" />
@@ -95,13 +102,13 @@ onBeforeUnmount(() => store.disconnect());
 </template>
 
 <style scoped lang="scss">
-.product-image-page { padding: 24px 32px 48px; max-width: 1600px; margin: 0 auto; }
-.workflow-heading { margin-bottom: 26px; h1 { font-size: 26px; font-weight: 600; margin-top: 12px; } p { color: var(--muted); font-size: 13px; margin-top: 6px; } .back { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); } }
+.product-image-page { padding: 28px 36px 48px; max-width: 1600px; margin: 0 auto; animation: page-appear .45s ease both; }
+.workflow-heading { margin-bottom: 28px; padding: 22px 28px; background: radial-gradient(ellipse at 100% 0, #e6f1ee, transparent 60%), #f1f7f4; border: 1px solid #e2eee8; border-radius: 20px; h1 { font-size: 28px; font-weight: 650; margin-top: 12px; letter-spacing: -.5px; } p { color: var(--text-secondary); font-size: 13px; margin-top: 6px; } .back { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: #769185; &:hover { color: var(--accent); } } }
 .workflow-layout { display: grid; grid-template-columns: 360px minmax(0, 1fr); gap: 28px; align-items: start; }
 .configuration {
-  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 24px;
-  h2 { font-size: 17px; margin-bottom: 20px; } fieldset { border: 0; padding: 0 4px 0 0; margin: 0; min-width: 0; max-height: calc(100vh - 470px); min-height: 240px; overflow-y: auto; } legend { font-size: 13px; margin-bottom: 10px; }
-  .upload { display: flex; justify-content: center; gap: 9px; align-items: center; position: relative; padding: 18px 12px; border: 1px dashed var(--border-strong); border-radius: var(--radius-sm); cursor: pointer; }
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 24px; box-shadow: var(--shadow);
+  h2 { font-size: 17px; margin-bottom: 20px; } fieldset { border: 0; padding: 0 4px 0 0; margin: 0; min-width: 0; max-height: calc(100dvh - 580px); min-height: 240px; overflow-y: auto; } legend { font-size: 13px; margin-bottom: 10px; }
+  .upload { display: flex; justify-content: center; gap: 9px; align-items: center; position: relative; padding: 24px 12px; color: var(--accent); background: #fcfaff; border: 1px dashed #c9b7ef; border-radius: var(--radius-sm); cursor: pointer; transition: background .2s; &:hover { background: var(--accent-soft); } }
   .upload input { position: absolute; inset: 0; width: 100%; opacity: 0; cursor: pointer; }
   fieldset:disabled .upload { opacity: .5; cursor: not-allowed; }
   .field { display: grid; gap: 7px; margin-top: 18px; font-size: 12px; }
@@ -116,6 +123,11 @@ onBeforeUnmount(() => store.disconnect());
 .task-status { padding: 16px; margin-bottom: 20px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); div { display: flex; justify-content: space-between; gap: 12px; font-size: 12px; } button { border: 0; background: transparent; color: var(--muted); text-decoration: underline; } progress { width: 100%; height: 6px; accent-color: var(--text); display: block; margin-top: 12px; } }
 .error { color: var(--error); font-size: 12px; margin-bottom: 16px; button { color: inherit; border: 0; background: transparent; text-decoration: underline; } }
 .notice { color: var(--success); margin-bottom: 16px; font-size: 12px; }
+.result-empty { min-height: 500px; border-style: solid; background: radial-gradient(ellipse at 50% 10%, #f0eafb, transparent 65%), #fff; }
+.preview-stack { display: flex; align-items: center; justify-content: center; padding: 12px 20px 28px; img { display: block; width: 120px; height: 168px; border: 5px solid white; border-radius: 10px; object-fit: cover; box-shadow: 0 12px 28px rgb(59 38 102 / 13%); transition: transform .3s; &:first-child { transform: rotate(-12deg) translateX(10px); } &:nth-child(2) { z-index: 1; transform: translateY(-12px); } &:last-child { transform: rotate(12deg) translateX(-10px); } &:hover { transform: translateY(-18px); } } }
+.preview-label { color: #9a88b6; font-size: 10px; letter-spacing: 2px; }
+.empty-workflow { display: inline-flex; align-items: center; gap: 14px; margin-top: 24px; padding: 8px 16px; border-radius: 30px; background: #f8f6fc; font-size: 10px; color: var(--text-secondary); > span { color: #baa6df; } }
+@media (max-width: 1100px) { .preview-stack { padding-inline: 0; img { width: 90px; height: 132px; } } .result-empty { padding-inline: 18px; } .empty-workflow { gap: 8px; padding-inline: 10px; } }
 @media (max-width: 1000px) { .workflow-layout { grid-template-columns: 300px minmax(0, 1fr); gap: 20px; } .configuration { padding: 18px; } .result-heading { flex-wrap: wrap; } }
 @media (max-width: 760px) { .product-image-page { padding-inline: 20px; } .workflow-layout { grid-template-columns: 1fr; } .configuration fieldset { max-height: none; } }
 </style>

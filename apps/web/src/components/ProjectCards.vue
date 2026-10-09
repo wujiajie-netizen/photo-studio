@@ -22,13 +22,13 @@ const dateFormatter = new Intl.DateTimeFormat('zh-CN', { year: 'numeric', month:
 <style scoped lang="scss">
 .project-grid {
   display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px; margin: 0; padding: 0; list-style: none;
-  li { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); transition: border-color .15s, box-shadow .15s; &:hover { border-color: var(--border-strong); box-shadow: var(--shadow); } }
+  li { background: linear-gradient(135deg, #fff, #fdfcff); border: 1px solid var(--border); border-radius: var(--radius); transition: border-color .2s, box-shadow .2s, transform .2s; &:hover { border-color: #d5c8f4; box-shadow: var(--shadow); transform: translateY(-4px); } }
   a { display: block; padding: 24px; position: relative; border-radius: inherit; }
   h3 { font-weight: 500; font-size: 15px; margin-top: 18px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   p { font-size: 11px; color: var(--muted); margin-top: 6px; }
 }
-.project-symbol { width: 48px; height: 48px; border-radius: 14px; background: var(--page); color: var(--text-secondary); display: grid; place-items: center; }
-.project-arrow { position: absolute; top: 26px; right: 24px; color: var(--muted); }
+.project-symbol { width: 48px; height: 48px; border-radius: 14px; background: linear-gradient(135deg, #eee6ff, #f7f1ff); color: var(--accent); display: grid; place-items: center; }
+.project-arrow { position: absolute; top: 26px; right: 24px; color: #ab98d2; }
 @media (max-width: 1050px) { .project-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 760px) { .project-grid { grid-template-columns: 1fr; } }
 </style>

@@ -9,6 +9,7 @@ import { Module } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import sharp from 'sharp';
 import { renderMockProductImage } from '@photo-studio/tools';
+import { LayerSegmentationError } from '@photo-studio/ai-provider';
 import { ImageToolController } from '../dist/image-tool.controller.js';
 import { ImageToolService } from '../dist/image-tool.service.js';
 import { ProductImageController } from '../dist/product-image.controller.js';
@@ -24,17 +25,29 @@ test('image tools preserve unmasked pixels, persist real layer outputs, validate
   const original = process.env.PHOTO_STUDIO_DATA_DIR; process.env.PHOTO_STUDIO_DATA_DIR = directory;
   let app; let base; let source; let mask; let emptyMask; let resultId; let document; let eraseTask; let splitTask; let textTask; let interruptedId;
   const sessionId = randomUUID(); const foreignSessionId = randomUUID(); const projectId = randomUUID();
-  const localCalls = []; let analysisCalls = 0; let generationCalls = 0;
+  const localCalls = []; let analysisCalls = 0; let generationCalls = 0; let segmentationFailures = 0; let analysisSource;
+  let analysisObjects = [{ name: '主体', x: 20, y: 5, width: 40, height: 30 }, { name: '装饰', x: 3, y: 35, width: 10, height: 10 }]; const analysisImageCounts = [];
   const provider = {
-    generateImage(id, input, prompt, signal) {
+    generateImage(id, input, prompt, signal, guide) {
       generationCalls++;
       if (prompt.includes('WAIT_CANCEL')) return new Promise((_, reject) => signal.addEventListener('abort', () => reject(new Error('cancelled')), { once: true }));
-      return sharp(input).metadata().then(({ width, height }) => {
+      return Promise.all([sharp(input).metadata(), sharp(input).ensureAlpha().raw().toBuffer(), guide ? sharp(guide).ensureAlpha().raw().toBuffer() : null]).then(([{ width, height }, originalPixels, guidePixels]) => {
+        if (guidePixels) {
+          assert.match(prompt, /Image 1 is the untouched original/);
+          assert.deepEqual([...originalPixels.subarray((30 * 80 + 40) * 4, (30 * 80 + 40) * 4 + 4)], [0, 0, 255, 255]);
+          assert.notDeepEqual([...guidePixels.subarray((30 * 80 + 40) * 4, (30 * 80 + 40) * 4 + 4)], [0, 0, 255, 255]);
+          assert.deepEqual([...guidePixels.subarray(0, 4)], [0, 0, 255, 255]);
+        }
         return sharp({ create: { width, height, channels: 4, background: '#00ff00' } }).png().toBuffer();
       });
     },
     processImage(id, input, operation, signal, progress) {
-      localCalls.push(operation.operation); assert.equal(signal.aborted, false); progress(50);
+      localCalls.push(operation.operation); assert.equal(signal.aborted, false);
+      const previousProgress = app.get(ImageToolService).task(id).progress; progress(50);
+      assert.ok(app.get(ImageToolService).task(id).progress >= previousProgress, '范围纠正后的进度不能倒退');
+      if (operation.operation === 'prepare-layers') analysisSource = input;
+      if (operation.operation === 'split-layers') assert.deepEqual(input, analysisSource);
+      if (operation.operation === 'split-layers' && segmentationFailures > 0) { segmentationFailures--; progress(90); return Promise.reject(new LayerSegmentationError('主体', '主体范围不完整。')); }
       return sharp(input).ensureAlpha().raw().toBuffer({ resolveWithObject: true }).then(({ data, info }) => {
         const text = [{ text: 'COFFEE', x: 8, y: 8, width: 40, height: 12, rotation: 0, fill: '#000000', align: 'left', fontFamily: 'Arial', fontSize: 10, fontStyle: 'normal', letterSpacing: .5, lineHeight: 1 }];
         if (operation.operation !== 'split-layers') return { images: [{ data: input, width: info.width, height: info.height, name: '背景' }], text };
@@ -45,7 +58,16 @@ test('image tools preserve unmasked pixels, persist real layer outputs, validate
         })).then(images => ({ images: [{ data: input, width: info.width, height: info.height, name: '背景' }, ...images], text: [] }));
       });
     },
-    async *run(input) { analysisCalls++; assert.ok(input.schema.properties.objects); yield { type: 'completed', result: { objects: [{ name: '主体', x: 20, y: 5, width: 40, height: 30 }, { name: '装饰', x: 3, y: 35, width: 10, height: 10 }] } }; },
+    async *run(input) {
+      analysisCalls++; assert.ok(input.schema.properties.objects);
+      const correcting = input.prompt.includes('This is one allowed correction');
+      analysisImageCounts.push(input.images.length); assert.ok(input.images.length <= 9);
+      assert.equal(input.images.length, correcting ? 2 + analysisObjects.slice(1).filter(object => Math.max(object.width, object.height) < 12).length : 2); assert.deepEqual(input.images[0], analysisSource); assert.notDeepEqual(input.images[1], analysisSource);
+      if (correcting && analysisObjects.length === 2) { assert.match(input.prompt, /ORIGINAL crop left=0, top=3, width=45, height=57/); assert.equal(input.images[2].readUInt32BE(16), 135); assert.equal(input.images[2].readUInt32BE(20), 171); }
+      assert.equal(input.images[1].readUInt32BE(16), 80); assert.equal(input.images[1].readUInt32BE(20), 60);
+      assert.match(input.prompt, /including all blank borders/);
+      yield { type: 'completed', result: { objects: analysisObjects } };
+    },
     cancel() { return Promise.resolve(); }
   };
   class TestModule {}
@@ -99,7 +121,10 @@ test('image tools preserve unmasked pixels, persist real layer outputs, validate
     assert.equal(task.outputLayers[1].fontFamily, 'Arial'); assert.equal(task.outputLayers[1].letterSpacing, .5);
     assert.deepEqual(localCalls, ['prepare-layers', 'split-layers', 'recognize-text']); assert.equal(analysisCalls, 1); assert.equal(generationCalls, 1);
     return send('/image-tools/tasks', { sessionId, resultId, input: { operation: 'erase', sourceAssetId: source.id, maskAssetId: emptyMask.id } }).then(({ body }) => wait(body.id));
-  }).then(task => { assert.equal(task.status, 'failed'); assert.match(task.error, /涂抹/); return send('/image-tools/tasks', { sessionId, resultId, input: { operation: 'edit', sourceAssetId: source.id, maskAssetId: null, prompt: 'WAIT_CANCEL' } }); }).then(({ status, body }) => { assert.equal(status, 201, JSON.stringify(body)); return new Promise(done => setTimeout(done, 30)).then(() => send(`/image-tools/tasks/${body.id}/cancel`, {})); }).then(({ status, body }) => {
+  }).then(task => { assert.equal(task.status, 'failed'); assert.match(task.error, /涂抹/); segmentationFailures = 1; return submit({ operation: 'split-layers' }); })
+    .then(task => { assert.equal(task.outputLayers.length, 4); assert.equal(analysisCalls, 3); segmentationFailures = 2; return send('/image-tools/tasks', { sessionId, resultId, input: { operation: 'split-layers', sourceAssetId: source.id } }).then(({ body }) => wait(body.id)); })
+    .then(task => { assert.equal(task.status, 'failed'); assert.deepEqual(task.outputResultIds, []); assert.deepEqual(task.outputLayers, []); assert.equal(analysisCalls, 5); assert.equal(segmentationFailures, 0); segmentationFailures = 1; analysisObjects = Array.from({ length: 8 }, (_, index) => ({ name: `元素${index + 1}`, x: 2 + index % 4 * 18, y: 5 + Math.floor(index / 4) * 20, width: 10, height: 10 })); return submit({ operation: 'split-layers' }); })
+    .then(task => { assert.equal(task.outputResultIds.length, 9); assert.deepEqual(analysisImageCounts.slice(-2), [2, 9]); return send('/image-tools/tasks', { sessionId, resultId, input: { operation: 'edit', sourceAssetId: source.id, maskAssetId: null, prompt: 'WAIT_CANCEL' } }); }).then(({ status, body }) => { assert.equal(status, 201, JSON.stringify(body)); return new Promise(done => setTimeout(done, 30)).then(() => send(`/image-tools/tasks/${body.id}/cancel`, {})); }).then(({ status, body }) => {
     assert.equal(status, 201, JSON.stringify(body));
     assert.equal(body.status, 'cancelled'); assert.deepEqual(body.outputResultIds, []);
     const database = app.get(StorageService).database; interruptedId = randomUUID();

@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve, sep } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { test } from 'node:test';
-import { CodexCliProvider } from '../dist/index.js';
+import { CodexCliProvider, LayerSegmentationError } from '../dist/index.js';
 
 test('local image transport isolates files, validates outputs and stops cancelled workers', context => {
   const directory = mkdtempSync(join(tmpdir(), 'photo-studio-local-tools-'));
@@ -22,7 +22,7 @@ test('local image transport isolates files, validates outputs and stops cancelle
     assert.equal(options.env.HF_HUB_OFFLINE, '1');
     const taskDirectory = args.at(-1); assert.equal(options.cwd, taskDirectory);
     assert.deepEqual(readFileSync(join(taskDirectory, 'source.png')), source);
-    assert.equal(JSON.parse(readFileSync(join(taskDirectory, 'input.json'), 'utf8')).operation, 'cutout');
+    assert.equal(JSON.parse(readFileSync(join(taskDirectory, 'input.json'), 'utf8')).operation, mode === 'layer-failure' ? 'split-layers' : 'cutout');
     const child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough(); child.stdin = new PassThrough();
     let closed = false;
     const close = code => { if (!closed) { closed = true; queueMicrotask(() => child.emit('close', code)); } };
@@ -31,9 +31,11 @@ test('local image transport isolates files, validates outputs and stops cancelle
       if (mode === 'hold') { child.stdout.write('{"progress":10}\n'); return; }
       if (mode === 'bad-progress') { child.stdout.write('{"progress":101}\n'); return; }
       if (mode === 'failure') { child.stderr.write('No foreground found'); close(1); return; }
+      if (mode === 'layer-failure') { writeFileSync(join(taskDirectory, 'failure.json'), JSON.stringify({ code: 'unreliable-layer', name: '咖啡豆', message: '物体范围包含邻物，无法可靠分离。' })); child.stderr.write('native segmentation diagnostic'); close(1); return; }
       const output = { images: [{ name: 'subject', width: 20, height: 20 }], text: [] };
       if (mode === 'bad-size') output.images[0].width = 0;
       if (mode === 'bad-text') output.text = [{ text: 'invalid', x: -1, y: 0, width: 1, height: 1 }];
+      if (mode === 'gradient' || mode === 'bad-gradient') output.text = [{ text: 'Sale', x: 0, y: 0, width: 20, height: 20, rotation: 0, fill: '#ff0000', align: 'left', fontFamily: 'Arial', fontSize: 12, fontStyle: 'bold italic', letterSpacing: 0, lineHeight: 1, fillGradient: { colors: ['#ff0000', '#0000ff'], angle: mode === 'bad-gradient' ? 361 : 90 } }];
       writeFileSync(join(taskDirectory, 'output.json'), JSON.stringify(output));
       writeFileSync(join(taskDirectory, 'image-0.png'), source);
       child.stdout.write('{"progress":50}\n'); close(0);
@@ -46,8 +48,11 @@ test('local image transport isolates files, validates outputs and stops cancelle
     assert.deepEqual(output.images[0].data, source); assert.deepEqual(output.text, []);
     mode = 'bad-size'; return assert.rejects(run(), /图层无效/);
   }).then(() => { mode = 'bad-text'; return assert.rejects(run(), /文字图层/); })
+    .then(() => { mode = 'gradient'; return run().then(output => { assert.deepEqual(output.text[0].fillGradient, { colors: ['#ff0000', '#0000ff'], angle: 90 }); assert.equal(output.text[0].fontStyle, 'bold italic'); }); })
+    .then(() => { mode = 'bad-gradient'; return assert.rejects(run(), /渐变/); })
     .then(() => { mode = 'bad-progress'; return assert.rejects(run(), /进度无效/); })
     .then(() => { mode = 'failure'; return assert.rejects(run(), /No foreground found/); })
+    .then(() => { mode = 'layer-failure'; return assert.rejects(provider.processImage(randomUUID(), source, { operation: 'split-layers', objects: [{ name: '咖啡豆', x: 0, y: 0, width: 20, height: 20 }] }, new AbortController().signal, () => {}), error => { assert.ok(error instanceof LayerSegmentationError); assert.equal(error.layerName, '咖啡豆'); assert.match(error.message, /物体范围/); return true; }); })
     .then(() => {
       mode = 'hold'; const controller = new AbortController();
       return assert.rejects(run(controller.signal, () => controller.abort()), /停止/);

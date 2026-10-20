@@ -10,7 +10,7 @@ const columns = 'id, result_id AS resultId, project_id AS projectId, name, width
 export class EditorService {
   constructor(@Inject(StorageService) private readonly storage: StorageService, @Inject(ProductImageService) private readonly images: ProductImageService) {}
   scene(sessionId: string): CreationScene {
-    if (!this.storage.database.prepare('SELECT id FROM agent_sessions WHERE id = ?').get(sessionId)) throw new NotFoundException('创作会话不存在。');
+    if (!this.storage.database.prepare('SELECT id FROM agent_sessions WHERE id = ? AND deleted_at IS NULL').get(sessionId)) throw new NotFoundException('创作会话不存在。');
     const row = this.storage.database.prepare('SELECT boards, viewport, selected_id AS selectedId, revision FROM creation_scenes WHERE session_id = ?').get(sessionId);
     return row ? { boards: JSON.parse(row.boards as string), viewport: JSON.parse(row.viewport as string), selectedId: row.selectedId as string | null, revision: row.revision as number } : { boards: [], viewport: { x: 0, y: 0, zoom: 1 }, selectedId: null, revision: 0 };
   }
@@ -20,11 +20,12 @@ export class EditorService {
     const scene = input as CreationScene; const position = (value: unknown) => typeof value === 'number' && Number.isFinite(value) && Math.abs(value) <= 1_000_000;
     if (!Number.isInteger(scene.revision) || scene.revision < 0 || !Array.isArray(scene.boards) || scene.boards.length > 2000 || !scene.viewport || Array.isArray(scene.viewport) || Object.keys(scene.viewport).length !== 3 || !position(scene.viewport.x) || !position(scene.viewport.y) || !Number.isFinite(scene.viewport.zoom) || scene.viewport.zoom < .03 || scene.viewport.zoom > 3) throw new BadRequestException('画板位置、缩放或选择无效。');
     const taskIds = new Set(this.storage.database.prepare('SELECT steps FROM agent_executions WHERE session_id = ?').all(sessionId).flatMap(row => (JSON.parse(row.steps as string) as { taskId: string | null }[]).map(step => step.taskId)));
+    const projectIds = new Set(this.storage.database.prepare('SELECT project_id FROM agent_sessions WHERE id = ? UNION SELECT project_id FROM agent_executions WHERE session_id = ?').all(sessionId, sessionId).map(row => row.project_id));
     const ids = new Set<string>();
     for (const board of scene.boards) {
       if (!board || Object.keys(board).length !== 3 || typeof board.resultId !== 'string' || ids.has(board.resultId) || !position(board.x) || !position(board.y)) throw new BadRequestException('画板内容或位置无效。');
       const result = this.images.result(board.resultId);
-      if (!taskIds.has(result.taskId) && !this.storage.database.prepare('SELECT id FROM image_tool_tasks WHERE id = ? AND session_id = ?').get(result.taskId, sessionId)) throw new BadRequestException('画板只能引用当前会话中的作品。');
+      if (!(result.projectId && projectIds.has(result.projectId)) && !taskIds.has(result.taskId) && !this.storage.database.prepare('SELECT id FROM image_tool_tasks WHERE id = ? AND session_id = ?').get(result.taskId, sessionId)) throw new BadRequestException('画板只能引用当前会话或关联项目中的作品。');
       ids.add(board.resultId);
     }
     if (scene.selectedId !== null && !ids.has(scene.selectedId)) throw new BadRequestException('请选择布局中的画板。');

@@ -9,7 +9,7 @@ import { validateAgentResult, type AgentMessage, type AgentResult, type AgentSes
 import { StorageService } from './storage.service';
 
 export const AGENT_MODEL_PROVIDER = Symbol('AGENT_MODEL_PROVIDER');
-const sessionColumns = 'id, title, created_at AS createdAt, updated_at AS updatedAt';
+const sessionColumns = 'id, title, project_id AS projectId, pinned_at AS pinnedAt, deleted_at AS deletedAt, created_at AS createdAt, updated_at AS updatedAt';
 const taskColumns = 'id, session_id AS sessionId, status, created_at AS createdAt, updated_at AS updatedAt, error';
 
 @Injectable()
@@ -27,13 +27,39 @@ export class AgentService implements OnApplicationShutdown {
   }
 
   list(): AgentSession[] {
-    return this.storage.database.prepare(`SELECT ${sessionColumns} FROM agent_sessions ORDER BY updated_at DESC, rowid DESC`).all() as unknown as AgentSession[];
+    return this.storage.database.prepare(`SELECT ${sessionColumns} FROM agent_sessions WHERE deleted_at IS NULL ORDER BY pinned_at DESC, updated_at DESC, rowid DESC`).all() as unknown as AgentSession[];
   }
 
   session(id: string): AgentSession {
-    const session = this.storage.database.prepare(`SELECT ${sessionColumns} FROM agent_sessions WHERE id = ?`).get(id) as unknown as AgentSession | undefined;
+    const session = this.storage.database.prepare(`SELECT ${sessionColumns} FROM agent_sessions WHERE id = ? AND deleted_at IS NULL`).get(id) as unknown as AgentSession | undefined;
     if (!session) throw new NotFoundException('会话不存在。');
     return session;
+  }
+
+  rename(id: string, title: unknown): AgentSession {
+    if (typeof title !== 'string' || !title.trim() || [...title.trim()].length > 80) throw new BadRequestException('请输入 1 到 80 个字符的对话名称。');
+    this.session(id);
+    this.storage.database.prepare('UPDATE agent_sessions SET title = ?, updated_at = ? WHERE id = ?').run(title.trim(), new Date().toISOString(), id);
+    return this.session(id);
+  }
+
+  manage(input: unknown): AgentSession[] {
+    if (!input || typeof input !== 'object' || Array.isArray(input)) throw new BadRequestException('对话操作参数无效。');
+    const body = input as { ids: unknown; action: unknown };
+    if (Object.keys(body).sort().join(',') !== 'action,ids' || !['pin', 'unpin', 'delete'].includes(body.action as string) || !Array.isArray(body.ids) || !body.ids.length || body.ids.some(id => typeof id !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)) || new Set(body.ids).size !== body.ids.length) throw new BadRequestException('请选择有效且不重复的对话，并指定操作。');
+    const ids = body.ids as string[]; const database = this.storage.database; const now = new Date().toISOString();
+    /* 先检查整批会话，再在同一事务中写入；有任务进行时禁止删除，保留项目、作品和关联记录。 */
+    database.exec('BEGIN IMMEDIATE;');
+    try {
+      ids.forEach(id => {
+        this.session(id);
+        if (body.action === 'delete' && ['agent_tasks', 'agent_executions', 'image_tool_tasks'].some(table => database.prepare(`SELECT id FROM ${table} WHERE session_id = ? AND status IN ('queued', 'running') LIMIT 1`).get(id))) throw new ConflictException('选中的对话还有任务进行中，请等待完成或停止任务后再删除。');
+      });
+      const statement = database.prepare(body.action === 'delete' ? 'UPDATE agent_sessions SET deleted_at = ? WHERE id = ?' : body.action === 'pin' ? 'UPDATE agent_sessions SET pinned_at = COALESCE(pinned_at, ?) WHERE id = ?' : 'UPDATE agent_sessions SET pinned_at = ? WHERE id = ?');
+      ids.forEach(id => statement.run(body.action === 'unpin' ? null : now, id));
+      database.exec('COMMIT;');
+    } catch (error) { database.exec('ROLLBACK;'); throw error; }
+    return this.list();
   }
 
   messages(id: string): AgentMessage[] {
@@ -49,6 +75,7 @@ export class AgentService implements OnApplicationShutdown {
   task(id: string): AgentTask {
     const task = this.storage.database.prepare(`SELECT ${taskColumns} FROM agent_tasks WHERE id = ?`).get(id) as unknown as AgentTask | undefined;
     if (!task) throw new NotFoundException('任务不存在。');
+    this.session(task.sessionId);
     return task;
   }
 

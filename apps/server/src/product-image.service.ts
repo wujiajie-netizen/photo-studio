@@ -5,7 +5,7 @@ import { copyFile, mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { Subject } from 'rxjs';
 import { prepareProductImage, type renderMockProductImage } from '@photo-studio/tools';
-import { validateProductImageParameters, type ProductAsset, type ProductImageParameters, type ProductImageResult, type ProductImageTask } from '@photo-studio/shared';
+import { validateProductImageParameters, type AgentExecutionStep, type EditorLayer, type ImageToolInput, type ProductAsset, type ProductImageParameters, type ProductImageResult, type ProductImageTask } from '@photo-studio/shared';
 import { StorageService } from './storage.service';
 import { ProjectsService } from './projects.service';
 import { ImageGenerationError } from '@photo-studio/ai-provider';
@@ -35,6 +35,28 @@ export class ProductImageService implements OnApplicationShutdown {
     return asset;
   }
   assetFile(id: string): string { this.asset(id); return this.file('uploads', id); }
+  removeAsset(id: string): { id: string } {
+    const database = this.storage.database;
+    database.exec('BEGIN IMMEDIATE');
+    /* 素材物理删除前检查执行队列与编辑图层，历史参数保留，重试时必须重新选择有效素材。 */
+    try {
+      this.asset(id);
+      const active = ['product_image_tasks', 'commerce_tasks'].some(table => database.prepare(`SELECT parameters FROM ${table} WHERE status IN ('queued', 'running')`).all().some(row => (JSON.parse(row.parameters as string) as ProductImageParameters).sourceAssetId === id))
+        || database.prepare(`SELECT steps FROM agent_executions WHERE status IN ('queued', 'running')`).all().some(row => (JSON.parse(row.steps as string) as AgentExecutionStep[]).some(step => step.parameters.sourceAssetId === id))
+        || database.prepare(`SELECT input FROM image_tool_tasks WHERE status IN ('queued', 'running')`).all().some(row => {
+          const input = JSON.parse(row.input as string) as ImageToolInput;
+          return input.sourceAssetId === id || 'maskAssetId' in input && input.maskAssetId === id;
+        });
+      if (active) throw new ConflictException('素材正在被任务使用，请等待完成或停止后再删除。');
+      if (database.prepare('SELECT layers FROM editor_documents').all().some(row => (JSON.parse(row.layers as string) as EditorLayer[]).some(layer => layer.type === 'asset-image' && (layer.assetId === id || layer.matteSourceAssetId === id)))) {
+        throw new ConflictException('素材正在被已保存作品使用，请先移除对应图层后再删除。');
+      }
+      database.prepare('UPDATE product_image_tasks SET source_asset_id = NULL WHERE source_asset_id = ?').run(id);
+      database.prepare('DELETE FROM product_assets WHERE id = ?').run(id);
+      database.exec('COMMIT');
+    } catch (error) { database.exec('ROLLBACK'); throw error; }
+    return { id };
+  }
   resultFile(id: string): string { this.result(id); return this.file('generated', id); }
   private file(directory: 'uploads' | 'generated', id: string): string {
     const path = resolve(this.storage.dataDirectory, directory, `${id}.png`);

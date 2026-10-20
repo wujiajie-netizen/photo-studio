@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Inject, Param, ParseUUIDPipe, Patch, Post, Query, Res, Sse, StreamableFile, UploadedFile, UseInterceptors, type MessageEvent } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Inject, Param, ParseUUIDPipe, Patch, Post, Query, Res, Sse, StreamableFile, UploadedFile, UseInterceptors, type MessageEvent } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { createReadStream } from 'node:fs';
 import type { Response } from 'express';
@@ -14,6 +14,7 @@ export class ProductImageController {
   @UseInterceptors(FileInterceptor('file', { limits: { fileSize: PRODUCT_UPLOAD_LIMIT, files: 1, fields: 1 } }))
   upload(@UploadedFile() file: Express.Multer.File | undefined, @Body('name') name: unknown) { return this.images.upload(file?.buffer, name); }
   @Get('assets/:id') asset(@Param('id', new ParseUUIDPipe({ version: '4' })) id: string) { return this.images.asset(id); }
+  @Delete('assets/:id') removeAsset(@Param('id', new ParseUUIDPipe({ version: '4' })) id: string) { return this.images.removeAsset(id); }
   @Get('assets/:id/file') assetFile(@Param('id', new ParseUUIDPipe({ version: '4' })) id: string) { return new StreamableFile(createReadStream(this.images.assetFile(id)), { type: 'image/png' }); }
   @Get('product-image/tasks') list() { return this.images.list(); }
   @Post('product-image/tasks') submit(@Body() parameters: unknown) { return this.images.submit(parameters); }

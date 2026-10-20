@@ -28,10 +28,11 @@ export class ImageToolService {
   task(id: string): ImageToolTask {
     const row = this.storage.database.prepare(`SELECT ${columns} FROM image_tool_tasks WHERE id = ?`).get(id);
     if (!row) throw new NotFoundException('图片处理任务不存在。');
+    if (!this.storage.database.prepare('SELECT id FROM agent_sessions WHERE id = ? AND deleted_at IS NULL').get(row.sessionId as string)) throw new NotFoundException('会话不存在。');
     return { ...row, input: JSON.parse(row.input as string), outputResultIds: JSON.parse(row.outputResultIds as string), outputLayers: JSON.parse(row.outputLayers as string) } as unknown as ImageToolTask;
   }
   list(sessionId: string): ImageToolTask[] {
-    if (!this.storage.database.prepare('SELECT id FROM agent_sessions WHERE id = ?').get(sessionId)) throw new NotFoundException('会话不存在。');
+    if (!this.storage.database.prepare('SELECT id FROM agent_sessions WHERE id = ? AND deleted_at IS NULL').get(sessionId)) throw new NotFoundException('会话不存在。');
     return this.storage.database.prepare('SELECT id FROM image_tool_tasks WHERE session_id = ? ORDER BY created_at DESC, rowid DESC').all(sessionId).map(row => this.task(row.id as string));
   }
   submit(value: unknown): ImageToolTask {
@@ -40,10 +41,11 @@ export class ImageToolService {
     if (![body.sessionId, body.resultId].every(id => typeof id === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id))) throw new BadRequestException('会话或作品编号无效。');
     try { input = validateImageToolInput(body.input); } catch (error) { throw new BadRequestException((error as Error).message); }
     this.list(body.sessionId); this.images.resultFile(body.resultId);
-    /* 作品必须来自本会话的执行或工具结果，避免错误会话接收处理结果。 */
+    /* 作品必须来自本会话或关联项目，独立工具生成的项目作品也可在创作页继续处理。 */
     const executions = this.storage.database.prepare('SELECT steps FROM agent_executions WHERE session_id = ?').all(body.sessionId);
     const result = this.images.result(body.resultId);
-    if (!executions.some(row => (JSON.parse(row.steps as string) as { taskId: string | null }[]).some(step => step.taskId === result.taskId)) && !this.storage.database.prepare('SELECT id FROM image_tool_tasks WHERE id = ? AND session_id = ?').get(result.taskId, body.sessionId)) throw new BadRequestException('请选择当前会话中的作品。');
+    const project = result.projectId && this.storage.database.prepare('SELECT id FROM agent_sessions WHERE id = ? AND project_id = ? UNION SELECT id FROM agent_executions WHERE session_id = ? AND project_id = ?').get(body.sessionId, result.projectId, body.sessionId, result.projectId);
+    if (!project && !executions.some(row => (JSON.parse(row.steps as string) as { taskId: string | null }[]).some(step => step.taskId === result.taskId)) && !this.storage.database.prepare('SELECT id FROM image_tool_tasks WHERE id = ? AND session_id = ?').get(result.taskId, body.sessionId)) throw new BadRequestException('请选择当前会话或关联项目中的作品。');
     const asset = this.images.asset(input.sourceAssetId); this.images.assetFile(asset.id);
     if ('maskAssetId' in input && input.maskAssetId !== null) {
       const mask = this.images.asset(input.maskAssetId); this.images.assetFile(mask.id);

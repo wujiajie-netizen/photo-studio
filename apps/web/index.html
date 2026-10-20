@@ -4,6 +4,10 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#202020" />
+    <!-- 公网访问先切换 HTTPS，本机开发保留 HTTP。 -->
+    <script>
+      if (location.protocol === 'http:' && !['localhost', '127.0.0.1', '[::1]'].includes(location.hostname)) location.replace(`https://${location.host}${location.pathname}${location.search}${location.hash}`);
+    </script>
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <title>Photo Studio · 电商视觉工作台</title>
   </head>

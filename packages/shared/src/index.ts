@@ -286,8 +286,17 @@ export function validateProductImageParameters(value: unknown): ProductImagePara
 export interface AgentSession {
   id: string;
   title: string;
+  projectId: string | null;
+  pinnedAt: string | null;
+  deletedAt: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface ProjectCreationContext {
+  sessionId: string;
+  projectId: string;
+  resultId: string | null;
 }
 
 export interface AgentMessage {
@@ -396,4 +405,15 @@ export function getProjectNameError(name: unknown): string {
   if (typeof name !== 'string' || !name.trim()) return '请输入项目名称。';
   if ([...name.trim()].length > PROJECT_NAME_LIMIT) return `项目名称最多 ${PROJECT_NAME_LIMIT} 个字符。`;
   return '';
+}
+
+export interface AuthUser {
+  id: string;
+  username: string;
+  role: 'admin' | 'member';
+}
+
+export interface AuthState {
+  user: AuthUser | null;
+  setupRequired: boolean;
 }

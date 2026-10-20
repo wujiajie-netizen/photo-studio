@@ -24,6 +24,21 @@ export const useAgentStore = defineStore('agent', () => {
     return request<AgentSession[]>('/agent/sessions').then((value) => { if (current === listVersion) sessions.value = value; });
   }
 
+  function renameSession(id: string, title: string) {
+    return request<AgentSession>(`/agent/sessions/${id}`, { method: 'PATCH', body: JSON.stringify({ title }) }).then(saved => {
+      ++listVersion;
+      sessions.value = sessions.value.map(item => item.id === id ? saved : item);
+      if (session.value?.id === id) session.value = saved;
+    });
+  }
+
+  function manageSessions(ids: string[], action: 'pin' | 'unpin' | 'delete') {
+    return request<AgentSession[]>('/agent/sessions/actions', { method: 'POST', body: JSON.stringify({ ids, action }) }).then(saved => {
+      ++listVersion; sessions.value = saved;
+      if (session.value) session.value = saved.find(item => item.id === session.value?.id) ?? null;
+    });
+  }
+
   function loadResult(task: AgentTask, current: number) {
     if (task.status !== 'succeeded') return Promise.resolve();
     return request<AgentResult>(`/agent/tasks/${task.id}/result`).then((value) => {
@@ -79,5 +94,5 @@ export const useAgentStore = defineStore('agent', () => {
       .catch((failure: Error) => { error.value = failure.message; });
   }
 
-  return { sessions, session, messages, tasks, results, loading, submitting, error, connection, busy, list, load, submit, cancel, disconnect };
+  return { sessions, session, messages, tasks, results, loading, submitting, error, connection, busy, list, renameSession, manageSessions, load, submit, cancel, disconnect };
 });

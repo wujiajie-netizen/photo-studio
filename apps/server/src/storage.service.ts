@@ -1,15 +1,16 @@
-import { Injectable, OnModuleDestroy } from '@nestjs/common';
+import { Inject, Injectable, OnModuleDestroy, Optional } from '@nestjs/common';
 import { mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
 @Injectable()
 export class StorageService implements OnModuleDestroy {
-  readonly dataDirectory = resolve(process.env.PHOTO_STUDIO_DATA_DIR || resolve(__dirname, '../../../data'));
+  readonly dataDirectory: string;
   readonly database: DatabaseSync;
   readonly beforeClose: (() => Promise<void>)[] = [];
 
-  constructor() {
+  constructor(@Optional() @Inject('PHOTO_STUDIO_DATA_DIRECTORY') directory?: string) {
+    this.dataDirectory = resolve(directory || process.env.PHOTO_STUDIO_DATA_DIR || resolve(__dirname, '../../../data'));
     for (const directory of ['', 'uploads', 'generated', 'exports', 'runs']) {
       mkdirSync(resolve(this.dataDirectory, directory), { recursive: true });
     }
@@ -29,7 +30,10 @@ export class StorageService implements OnModuleDestroy {
         title TEXT NOT NULL,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
-        provider_session_id TEXT
+        provider_session_id TEXT,
+        pinned_at TEXT,
+        deleted_at TEXT,
+        project_id TEXT REFERENCES projects(id) ON DELETE SET NULL
       ) STRICT;
       CREATE TABLE IF NOT EXISTS agent_messages (
         id TEXT PRIMARY KEY NOT NULL,
@@ -174,6 +178,17 @@ export class StorageService implements OnModuleDestroy {
         updated_at TEXT NOT NULL
       ) STRICT;
     `);
+    /* 旧会话补充可空的管理字段和默认项目，不改动消息、任务、作品及其引用。 */
+    const sessionColumns = this.database.prepare('PRAGMA table_info(agent_sessions)').all();
+    const missingSessionColumns = ['pinned_at', 'deleted_at'].filter(name => !sessionColumns.some(column => column.name === name));
+    if (missingSessionColumns.length) {
+      this.database.exec('BEGIN IMMEDIATE;');
+      try {
+        missingSessionColumns.forEach(name => this.database.exec(`ALTER TABLE agent_sessions ADD COLUMN ${name} TEXT;`));
+        this.database.exec('COMMIT;');
+      } catch (error) { this.database.exec('ROLLBACK;'); throw error; }
+    }
+    if (!sessionColumns.some(column => column.name === 'project_id')) this.database.exec('ALTER TABLE agent_sessions ADD COLUMN project_id TEXT REFERENCES projects(id) ON DELETE SET NULL;');
     /* 旧库只放宽素材列；迁移前保存完整 SQLite 快照，事务内保留原任务和结果引用。 */
     if (this.database.prepare('PRAGMA table_info(product_image_tasks)').all().some(column => column.name === 'source_asset_id' && column.notnull === 1)) {
       const backup = resolve(this.dataDirectory, 'runs', `before-text-generation-${Date.now()}.db`);

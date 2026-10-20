@@ -38,6 +38,7 @@ export class AgentExecutionService {
   task(id: string): AgentExecution {
     const row = this.storage.database.prepare(`SELECT ${columns} FROM agent_executions WHERE id = ?`).get(id);
     if (!row) throw new NotFoundException('执行任务不存在。');
+    this.agent.session(row.sessionId as string);
     return { ...row, steps: JSON.parse(row.steps as string) } as unknown as AgentExecution;
   }
   draft(planTaskId: string): Promise<AgentParameters> {
@@ -116,7 +117,9 @@ export class AgentExecutionService {
     if (this.stopped || this.queue.length >= 5) throw new ConflictException('执行队列已满或服务正在停止，请稍后提交。');
     if (this.list(value.planTaskId).some(item => ['queued', 'running'].includes(item.status))) throw new ConflictException('该计划已有执行中的任务，请等待或取消。');
     const previous = this.storage.database.prepare('SELECT project_id FROM agent_executions WHERE session_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1').get(this.agent.task(value.planTaskId).sessionId);
-    const projectId = value.projectId ?? (previous?.project_id as string | undefined) ?? this.projects.create(this.agent.session(this.agent.task(value.planTaskId).sessionId).title.slice(0, 80)).id;
+    const session = this.agent.session(this.agent.task(value.planTaskId).sessionId);
+    const projectId = value.projectId ?? session.projectId ?? (previous?.project_id as string | undefined) ?? this.projects.create(session.title.slice(0, 80)).id;
+    this.projects.findOne(projectId);
     const now = new Date().toISOString();
     return this.enqueue({ id: randomUUID(), sessionId: this.agent.task(value.planTaskId).sessionId, planTaskId: value.planTaskId, projectId, status: 'queued', progress: 0, steps, createdAt: now, updatedAt: now, error: null });
   }

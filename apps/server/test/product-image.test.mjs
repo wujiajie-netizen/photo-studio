@@ -102,9 +102,9 @@ test('serial image queue cancels running and waiting work, retries failures and 
   });
   service = new ProductImageService(storage, new ProjectsService(storage), render);
   let parameters; let first; let second; let interrupted;
-  function wait(id, status, attempt = 0) {
-    if (service.task(id).status === status && (status !== 'running' || releases.length)) return Promise.resolve();
-    assert.ok(attempt < 150); return new Promise((done) => setTimeout(done, 10)).then(() => wait(id, status, attempt + 1));
+  function wait(id, status, callCount = 1, attempt = 0) {
+    if (service.task(id).status === status && (status !== 'running' || releases.length >= callCount)) return Promise.resolve();
+    assert.ok(attempt < 150); return new Promise((done) => setTimeout(done, 10)).then(() => wait(id, status, callCount, attempt + 1));
   }
   return sharp({ create: { width: 20, height: 20, channels: 3, background: '#ffffff' } }).png().toBuffer()
     .then((input) => service.upload(input, '排队原图.png')).then((asset) => {
@@ -115,10 +115,11 @@ test('serial image queue cancels running and waiting work, retries failures and 
       assert.equal(service.cancel(second.id).status, 'cancelled'); assert.equal(service.cancel(first.id).status, 'cancelled');
       return wait(first.id, 'cancelled');
     }).then(() => {
-      first = service.retry(first.id); return wait(first.id, 'running');
-    }).then(() => new Promise((done) => setTimeout(done, 30))).then(() => {
+      /* 等待实际工具启动，避免并行测试时固定 30ms 先于文件准备完成。 */
+      first = service.retry(first.id); return wait(first.id, 'running', 2);
+    }).then(() => {
       assert.equal(calls.length, 2); releases.at(-1).reject(new Error('mock failure')); return wait(first.id, 'failed');
-    }).then(() => { assert.match(service.task(first.id).error, /生成失败/); assert.equal(service.results(first.id).length, 0); interrupted = service.retry(first.id); return wait(interrupted.id, 'running'); })
+    }).then(() => { assert.match(service.task(first.id).error, /生成失败/); assert.equal(service.results(first.id).length, 0); interrupted = service.retry(first.id); return wait(interrupted.id, 'running', 3); })
     .then(() => storage.onModuleDestroy()).then(() => {
       storage = new StorageService(); service = new ProductImageService(storage, new ProjectsService(storage), render);
       assert.equal(service.task(interrupted.id).status, 'failed'); assert.match(service.task(interrupted.id).error, /重新启动/); assert.equal(service.task(second.id).status, 'cancelled');

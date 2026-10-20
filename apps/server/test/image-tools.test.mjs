@@ -95,7 +95,7 @@ test('image tools preserve unmasked pixels, persist real layer outputs, validate
   }).then(asset => { mask = asset; return sharp({ create: { width: 80, height: 60, channels: 3, background: '#000000' } }).png().toBuffer().then(data => upload(data, 'empty.png')); }).then(asset => {
     emptyMask = asset; const database = app.get(StorageService).database; const now = new Date().toISOString(); const productTaskId = randomUUID(); const planId = randomUUID(); resultId = randomUUID();
     database.prepare('INSERT INTO projects VALUES (?, ?, ?, ?)').run(projectId, '工具测试', now, now);
-    for (const id of [sessionId, foreignSessionId]) database.prepare('INSERT INTO agent_sessions VALUES (?, ?, ?, ?, ?)').run(id, '工具测试', now, now, null);
+    for (const id of [sessionId, foreignSessionId]) database.prepare('INSERT INTO agent_sessions (id, title, created_at, updated_at, provider_session_id) VALUES (?, ?, ?, ?, ?)').run(id, '工具测试', now, now, null);
     database.prepare('INSERT INTO agent_tasks VALUES (?, ?, ?, ?, ?, ?)').run(planId, sessionId, 'succeeded', now, now, null);
     database.prepare('INSERT INTO product_image_tasks VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(productTaskId, source.id, '{}', 'succeeded', 100, now, now, null);
     database.prepare('INSERT INTO product_image_results VALUES (?, ?, ?, ?, ?, ?, ?)').run(resultId, productTaskId, '原图.png', 80, 60, now, projectId);

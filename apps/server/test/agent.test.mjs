@@ -79,7 +79,7 @@ test('Agent API persists sessions, streams saved states, validates plans and con
     });
   }).then(() => wait(first.id, 'succeeded')).then(() => Promise.all([
     send(`/tasks/${first.id}/result`).then((response) => assert.deepEqual(response.body, plan)),
-    send(`/sessions/${first.sessionId}`).then((response) => { assert.deepEqual(Object.keys(response.body).sort(), ['createdAt', 'id', 'title', 'updatedAt']); assert.equal(response.body.title, '咖啡主图需求'); }),
+    send(`/sessions/${first.sessionId}`).then((response) => { assert.deepEqual(Object.keys(response.body).sort(), ['createdAt', 'deletedAt', 'id', 'pinnedAt', 'projectId', 'title', 'updatedAt']); assert.equal(response.body.projectId, null); assert.equal(response.body.title, '咖啡主图需求'); }),
     send(`/sessions/${first.sessionId}/messages`).then((response) => { assert.deepEqual(response.body.map((message) => message.role), ['user', 'assistant']); })
   ])).then(() => send(`/sessions/${first.sessionId}/messages`, { content: '补充咖啡卖点' })).then((response) => { second = response.body; return wait(second.id, 'running'); })
     .then(() => {

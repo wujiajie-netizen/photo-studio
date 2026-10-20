@@ -22,5 +22,12 @@ export const useProjectsStore = defineStore('projects', () => {
       .finally(() => { if (version === loadVersion) loading.value = false; });
   }
 
-  return { projects, loading, error, load };
+  function remove(id: string) {
+    return request<{ id: string }>(`/projects/${id}`, { method: 'DELETE' }).then(() => {
+      ++loadVersion; loading.value = false;
+      projects.value = projects.value.filter(project => project.id !== id);
+    });
+  }
+
+  return { projects, loading, error, load, remove };
 });

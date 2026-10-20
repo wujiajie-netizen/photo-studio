@@ -6,6 +6,7 @@ import { ProductCanvas } from '@photo-studio/editor';
 import { validateEditorContent, type AgentExecution, type CommerceTask, type ProductAsset, type ProductImageResult, type EditorShapeLayer, type ImageToolTask, type ImageToolInput, type CreationScene } from '@photo-studio/shared';
 import { request } from '../api';
 import { useEditorStore } from '../stores/editor';
+import { useAgentStore } from '../stores/agent';
 import CanvasProperties from './CanvasProperties.vue';
 import CanvasCrop from './CanvasCrop.vue';
 import CanvasDraw from './CanvasDraw.vue';
@@ -17,7 +18,7 @@ import CanvasLibrary from './CanvasLibrary.vue';
 import CanvasExport from './CanvasExport.vue';
 import CutoutRefinement from './CutoutRefinement.vue';
 
-const props = defineProps<{ sessionId: string; taskIds: string[] }>();
+const props = defineProps<{ sessionId: string; taskIds: string[]; projectId: string | null; resultId: string | null }>();
 const emit = defineEmits<{ update: [state: { executions: AgentExecution[]; results: ProductImageResult[]; selectedId: string; loading: boolean }]; reference: [asset: ProductAsset, modifying: boolean]; reveal: [resultId: string] }>();
 const executions = ref<AgentExecution[]>([]); const results = ref<ProductImageResult[]>([]);
 const activeExecution = computed(() => executions.value.find(execution => ['queued', 'running'].includes(execution.status)));
@@ -30,9 +31,10 @@ const specialMode = computed(() => !!maskMode.value || cropping.value || !!toolS
 const canvasScale = ref(1); const sceneReady = ref(false); const sceneError = ref('');
 let sceneRevision = 0; let sceneChanges = 0; let savedSceneChanges = 0; let sceneTimer: ReturnType<typeof setTimeout> | null = null; let scenePending: Promise<void> | null = null;
 let sceneSession = props.sessionId;
+let initialResultPending = true;
 let boardDrag: { id: string; x: number; y: number; clientX: number; clientY: number } | null = null; let renderError = ''; let spaceHand: boolean | null = null;
 const referencing = ref(false);
-const editor = useEditorStore(); const editing = ref(false); const panel = ref(false); const overview = ref(false); const help = ref(false); const exporting = ref(false);
+const editor = useEditorStore(); const agent = useAgentStore(); const editing = ref(false); const panel = ref(false); const overview = ref(false); const help = ref(false); const exporting = ref(false);
 const imageId = ref('');
 const cropping = ref(false); const tools = ref(false); const picked = ref(false);
 const maskMode = ref<'edit' | 'erase' | 'replace-text' | null>(null); const toolSubmitting = ref(false); const toolTasks = ref<ImageToolTask[]>([]);
@@ -60,6 +62,7 @@ const saveStatus = computed(() => editor.loading ? '正在读取编辑内容…'
 let painting: Promise<void> = Promise.resolve();
 let start: { x: number; y: number; offsetX: number; offsetY: number } | null = null;
 const area = ref<HTMLDivElement | null>(null); const container = ref<HTMLDivElement | null>(null);
+const textInput = ref<HTMLTextAreaElement | null>(null);
 const areaSize = ref({ width: 0, height: 0 });
 const flight = ref<{ resultId: string; left: number; top: number; width: number; height: number; ready: boolean } | null>(null); const flightImage = ref<HTMLImageElement | null>(null);
 let arrival: Animation | null = null;
@@ -100,6 +103,13 @@ const actionPosition = computed(() => {
   const width = Math.min(580, viewport.value.width); const center = x + (editor.content?.width ?? selected.value?.width ?? 0) * zoom.value / 2;
   return { left: `${Math.max(viewport.value.left + width / 2, Math.min(viewport.value.left + viewport.value.width - width / 2, center)) - x}px`, top: `${Math.max(78, Math.min(areaSize.value.height - 160, y - 65)) - y}px`, bottom: 'auto', maxWidth: `${width}px` };
 });
+const textEntryPosition = computed(() => {
+  const layer = editor.layer; if (layer?.type !== 'text') return {};
+  const width = Math.min(360, viewport.value.width - 24);
+  const x = offset.value.x + ((board.value?.x ?? 0) + layer.x + layer.width / 2) * zoom.value;
+  const y = offset.value.y + ((board.value?.y ?? 0) + layer.y + layer.height) * zoom.value;
+  return { width: `${width}px`, left: `${Math.max(viewport.value.left + width / 2 + 12, Math.min(viewport.value.left + viewport.value.width - width / 2 - 12, x))}px`, top: `${Math.max(120, Math.min(areaSize.value.height - 230, y + 12))}px` };
+});
 let canvas: ProductCanvas | null = null; let observer: ResizeObserver | null = null; let version = 0; let resultVersion = 0;
 const streams = new Map<string, EventSource>();
 const labels = { queued: '等待生成', running: '生成和检查中', succeeded: '作品已保存', failed: '生成需要处理', cancelled: '生成已停止' };
@@ -124,6 +134,8 @@ function fit(all = false) {
 }
 function saveScene(): Promise<void> {
   if (sceneTimer) { clearTimeout(sceneTimer); sceneTimer = null; }
+  /* 当前会话已删除或卸载时不再保存布局；作品编辑内容由删除流程提前保存。 */
+  if (agent.session?.id !== sceneSession) return Promise.resolve();
   if (scenePending) return scenePending.then(() => saveScene());
   if (!sceneReady.value || sceneChanges === savedSceneChanges) return Promise.resolve();
   const current = version; const change = sceneChanges;
@@ -281,7 +293,18 @@ function addText(point?: { x: number; y: number }) {
   const content = editor.content; const id = crypto.randomUUID();
   const fontSize = Math.max(8, Math.min(72, Math.round(content.width * .06)));
   content.layers.push({ id, type: 'text', name: '新文字', x: point?.x ?? content.width * .1, y: point?.y ?? content.height * .1, width: Math.min(content.width * .6, content.width - (point?.x ?? content.width * .1)), height: fontSize * 3, rotation: 0, opacity: 1, visible: true, locked: false, text: '输入商品文案', fontSize, fontFamily: 'Microsoft YaHei', fill: '#202020', align: 'left' });
-  editor.selected = id; editor.commit(); placingText.value = false; editingText.value = true; picked.value = true; panel.value = false;
+  editor.selected = id; editor.commit(); placingText.value = false; picked.value = true; panel.value = false; editText();
+}
+function editText() {
+  const layer = editor.layer; if (layer?.type !== 'text' || layer.locked || hand.value || specialMode.value) return;
+  editingText.value = true; picked.value = true;
+  /* 小比例下先定位并放大文字，再聚焦全选输入框，避免用户寻找当前编辑位置。 */
+  if (zoom.value < .6) {
+    zoom.value = Math.max(zoom.value, Math.min(.6, (viewport.value.width - 40) / layer.width, (viewport.value.height - 80) / layer.height));
+    const angle = layer.rotation * Math.PI / 180;
+    offset.value = { x: viewport.value.left + viewport.value.width / 2 - ((board.value?.x ?? 0) + layer.x + (layer.width * Math.cos(angle) - layer.height * Math.sin(angle)) / 2) * zoom.value, y: 90 + viewport.value.height / 2 - ((board.value?.y ?? 0) + layer.y + (layer.width * Math.sin(angle) + layer.height * Math.cos(angle)) / 2) * zoom.value };
+  }
+  nextTick().then(() => { if (editingText.value && editor.selected === layer.id) { textInput.value?.focus(); textInput.value?.select(); } });
 }
 function placeText(event: PointerEvent) {
   const content = editor.content; const bounds = container.value?.getBoundingClientRect(); if (!content || !bounds) return;
@@ -392,10 +415,13 @@ function addExecution(execution: AgentExecution) {
 defineExpose({ addExecution, select, animateResult });
 function readResults(current: number) {
   const revision = ++resultVersion;
-  /* 只读取本会话执行步骤实际引用的结果，套图过滤旧重试图片；切换会话后丢弃未完成请求。 */
-  return Promise.all([...executions.value.flatMap(execution => execution.steps.filter(step => step.taskId).map(step => step.tool === 'product-image'
+  /* 恢复本会话结果和当前项目作品，直接打开已有编辑文档；切换会话后丢弃未完成请求。 */
+  const requests = executions.value.flatMap(execution => execution.steps.filter(step => step.taskId).map(step => step.tool === 'product-image'
     ? request<ProductImageResult[]>(`/product-image/tasks/${step.taskId}/results`)
-    : Promise.all([request<CommerceTask>(`/commerce/tasks/${step.taskId}`), request<ProductImageResult[]>(`/commerce/tasks/${step.taskId}/results`)]).then(([task, saved]) => saved.filter(result => task.items.some(item => item.resultId === result.id))))), Promise.all(toolTasks.value.filter(task => task.status === 'succeeded').flatMap(task => task.outputResultIds.slice(0, 1).map(id => request<ProductImageResult>(`/product-image/results/${id}`))))])
+    : Promise.all([request<CommerceTask>(`/commerce/tasks/${step.taskId}`), request<ProductImageResult[]>(`/commerce/tasks/${step.taskId}/results`)]).then(([task, saved]) => saved.filter(result => task.items.some(item => item.resultId === result.id)))));
+  requests.push(Promise.all(toolTasks.value.filter(task => task.status === 'succeeded').flatMap(task => task.outputResultIds.slice(0, 1).map(id => request<ProductImageResult>(`/product-image/results/${id}`)))));
+  if (props.projectId) requests.push(request<ProductImageResult[]>(`/projects/${props.projectId}/results`));
+  return Promise.all(requests)
     .then(values => {
       if (current !== version || revision !== resultVersion) return;
       const existing = new Set(results.value.map(result => result.id));
@@ -403,7 +429,13 @@ function readResults(current: number) {
       boards.value = boards.value.filter(item => results.value.some(result => result.id === item.resultId));
       for (const result of results.value) if (!boards.value.some(item => item.resultId === result.id)) { const right = Math.max(0, ...boards.value.map(item => item.x + (boardSizes.value[item.resultId]?.width ?? results.value.find(value => value.id === item.resultId)!.width) + 160)); boards.value.push({ resultId: result.id, x: right, y: 0 }); }
       const added = results.value.filter(result => !existing.has(result.id)).sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
-      if (!existing.size && selectedId.value && results.value.some(result => result.id === selectedId.value)) { const id = selectedId.value; selectedId.value = ''; select(id, false); }
+      if (initialResultPending && props.resultId) {
+        initialResultPending = false;
+        if (!results.value.some(result => result.id === props.resultId)) throw new Error('这张图片已不在当前创作中，请返回项目重新打开。');
+        selectedId.value = ''; return select(props.resultId);
+      }
+      initialResultPending = false;
+      if (!existing.size && selectedId.value && results.value.some(result => result.id === selectedId.value)) { const id = selectedId.value; selectedId.value = ''; return select(id, false); }
       else if (added && (!selected.value || added.createdAt > selected.value.createdAt)) return select(added.id)?.then(() => { if (current === version && !loading.value && selectedId.value === added.id) emit('reveal', added.id); });
       else if (!results.value.some(result => result.id === selectedId.value)) {
         if (results.value[0]) select(results.value[0].id);
@@ -412,6 +444,7 @@ function readResults(current: number) {
     });
 }
 function load() {
+  initialResultPending = true;
   refinement.value = null; refinementError.value = '';
   cancelArrival();
   const current = ++version; ++resultVersion; for (const stream of streams.values()) stream.close(); streams.clear();
@@ -429,6 +462,7 @@ function load() {
     .finally(() => { if (current === version) loading.value = false; });
 }
 watch(() => props.sessionId, () => editor.save().then(saveScene).then(load).catch((reason: Error) => { error.value = reason.message; }), { immediate: true });
+watch(() => props.resultId, id => { if (id && !loading.value && results.value.some(result => result.id === id)) select(id); });
 watch(() => props.taskIds, () => { const current = version; if (!sceneReady.value) return; Promise.all(props.taskIds.map(id => request<AgentExecution[]>(`/agent/tasks/${id}/executions`))).then(values => { if (current !== version) return; executions.value = values.flat().sort((a, b) => b.createdAt.localeCompare(a.createdAt)); for (const execution of executions.value) subscribe(execution, current); return readResults(current); }).catch((reason: Error) => { error.value = reason.message; }); });
 watch([executions, results, selectedId, loading], () => emit('update', { executions: executions.value, results: results.value, selectedId: selectedId.value, loading: loading.value }), { deep: true, immediate: true });
 watch([selected, zoom, editing, hand, cropping, drawing, drawingShape, placingText, maskMode, toolSettings, () => editor.content], () => nextTick(paint), { deep: true });
@@ -460,26 +494,26 @@ onUnmounted(() => { saveScene().catch(() => {}); ++version; if (sceneTimer) clea
       <template v-if="!specialMode && !loading"><div v-for="item in boards.filter(item => item.resultId !== selectedId)" :key="item.resultId" class="canvas-board" :style="{ transform: `translate(${offset.x + item.x * zoom}px, ${offset.y + item.y * zoom}px)` }" @click="select(item.resultId, false)"><button type="button" class="board-title" :aria-label="`移动画板 ${results.find(result => result.id === item.resultId)?.name}`" @pointerdown="startBoard($event, item.resultId)">{{ results.find(result => result.id === item.resultId)?.name }}</button><CanvasBoardPreview :result-id="item.resultId" :zoom="zoom" @size="boardSizes[item.resultId] = $event" /></div></template>
       <div v-show="selected" class="canvas-content" :class="{ arriving: flight?.ready }" :style="specialMode ? { left: `${viewport.left + viewport.width / 2}px`, top: '50%', transform: `translate(${-((toolSettings === 'expand' ? expandBox.x + expandBox.width / 2 : (editor.content?.width ?? 0) / 2) * canvasScale)}px, ${-((toolSettings === 'expand' ? expandBox.y + expandBox.height / 2 : (editor.content?.height ?? 0) / 2) * canvasScale) - (maskMode ? 80 : 45)}px)` } : { left: '0', top: '0', transform: `translate(${offset.x + (board?.x ?? 0) * zoom}px, ${offset.y + (board?.y ?? 0) * zoom}px)` }">
         <button v-if="selected && !specialMode" type="button" class="board-title" :aria-label="`移动画板 ${selected.name}`" @pointerdown="startBoard($event, selected.id)">{{ editing && editor.content ? editor.content.name : selected.name }} · {{ editing && editor.content ? editor.content.width : selected.width }} × {{ editing && editor.content ? editor.content.height : selected.height }}</button>
-        <div v-if="picked && !hand && !cropping && !drawing && !drawingShape && !placingText && !maskMode && !toolSettings" class="selected-actions" :style="actionPosition" role="toolbar" aria-label="当前作品操作" @pointerdown.stop>
+        <div v-if="picked && editor.layer && !hand && !cropping && !drawing && !drawingShape && !placingText && !maskMode && !toolSettings" class="selected-actions" :style="actionPosition" role="toolbar" aria-label="当前作品操作" @pointerdown.stop>
           <template v-if="editor.layer?.type === 'image' || editor.layer?.type === 'asset-image'">
             <button type="button" :disabled="toolSubmitting || !!activeTool" @click="openTool('split-layers')"><Layers3 :size="14" /> 拆分图层</button>
             <div class="tool-menu"><button type="button" :aria-expanded="textMenu" :disabled="toolSubmitting || !!activeTool" @click="textMenu = !textMenu; tools = false"><Type :size="14" /> 编辑文字</button><div v-if="textMenu" role="menu"><button type="button" role="menuitem" @click="openTool('recognize-text')">直接编辑</button><button type="button" role="menuitem" @click="openTool('replace-text')">无痕改字</button><button type="button" role="menuitem" @click="textMenu = false; edit(true)">添加文字</button></div></div>
             <button type="button" :disabled="toolSubmitting || !!activeTool" @click="openTool('edit')"><Sparkles :size="14" /> AI 改图</button><button type="button" :disabled="toolSubmitting || !!activeTool" @click="openTool('upscale')">AI 超清</button>
             <div class="tool-menu"><button type="button" :aria-expanded="tools" :disabled="toolSubmitting" @click="tools = !tools; textMenu = false"><Crop :size="14" /> 工具</button><div v-if="tools" role="menu"><button type="button" role="menuitem" @click="crop">调整尺寸</button><button type="button" role="menuitem" :disabled="toolSubmitting || !!activeTool" @click="openTool('erase')">AI 无痕消除</button><button type="button" role="menuitem" :disabled="toolSubmitting || !!activeTool" @click="openTool('cutout')">抠图</button><button v-if="refinable" type="button" role="menuitem" :disabled="refining || editor.layer?.locked" @click="refinement = refinable; refinementError = ''; tools = false">修整抠图</button><button type="button" role="menuitem" :disabled="toolSubmitting || !!activeTool" @click="openTool('expand')">AI 扩图</button><button type="button" role="menuitem" :disabled="referencing" @click="tools = false; reference(false)">引用图片</button></div></div>
           </template>
-          <CanvasTextTools v-else-if="editor.layer?.type === 'text'" @edit="editingText = true" />
+          <CanvasTextTools v-else-if="editor.layer?.type === 'text'" @edit="editText" />
           <template v-else><button type="button" :disabled="!editor.layer || editor.layer.locked" @click="duplicate"><Copy :size="14" /> 复制</button><button type="button" :disabled="!editor.layer || editor.layer.locked" @click="removeLayer"><Trash2 :size="14" /> 删除</button></template>
           <button type="button" :aria-pressed="panel" aria-label="编辑属性" title="编辑属性" @click="panel ? panel = false : edit()"><SlidersHorizontal :size="15" /></button>
         </div>
-        <div ref="container" role="img" :aria-label="selected?.name" @dblclick="editingText = editor.layer?.type === 'text'" />
-        <div v-if="placingText && !hand" class="text-placement" aria-label="点击画板添加文字" @pointerdown.stop="placeText" />
+        <div ref="container" role="img" :aria-label="selected?.name" @dblclick="editText" />
+        <div v-if="placingText && !hand" class="text-placement" aria-label="点击画板添加文字" @pointerdown.stop.prevent="placeText" />
         <CanvasShapeDraw v-if="drawingShape && editor.content && !hand" :shape="drawingShape" :width="editor.content.width" :height="editor.content.height" @draw="addShape(drawingShape!, $event)" />
-        <div v-if="editingText && editor.layer?.type === 'text'" class="text-entry" @pointerdown.stop><textarea v-model="editor.layer.text" aria-label="编辑文字内容" rows="2" maxlength="2000" :disabled="editor.layer.locked" @input="updateText" /><button type="button" @click="editingText = false">完成</button></div>
         <CanvasCrop v-if="cropping && editor.content" :width="editor.content.width" :height="editor.content.height" @cancel="cropping = false; picked = true; fit()" @apply="applyCrop" />
         <CanvasDraw v-if="drawing && editor.content" :width="editor.content.width" :height="editor.content.height" :stroke="brushColor" :size="brushSize" @draw="draw" />
         <CanvasMask v-if="maskMode && editor.content" :width="editor.content.width" :height="editor.content.height" :mode="maskMode" :busy="toolSubmitting" @cancel="maskMode = null; picked = true; fit()" @apply="applyMask" />
         <CanvasCrop v-if="toolSettings === 'expand' && editor.content" :width="editor.content.width" :height="editor.content.height" expanding :busy="toolSubmitting" @resize="expandBox = $event; paint()" @cancel="toolSettings = null; picked = true; fit()" @apply="submitTool({ operation: 'expand', width: $event.width, height: $event.height, x: -$event.x, y: -$event.y, prompt: '' })" />
       </div>
+      <div v-if="editingText && editor.layer?.type === 'text'" class="text-entry" :style="textEntryPosition" @pointerdown.stop><textarea ref="textInput" v-model="editor.layer.text" aria-label="编辑文字内容" rows="2" maxlength="2000" :disabled="editor.layer.locked" @input="updateText" @keydown.esc.stop="editingText = false; area?.focus()" /><button type="button" title="完成编辑 Esc" @click="editingText = false; area?.focus()">完成</button></div>
       <div v-if="overview" class="canvas-overview" aria-label="全部作品"><header><strong>全部作品 · {{ results.length }} 张</strong><button type="button" aria-label="关闭作品总览" @click="overview = false"><X :size="14" /></button></header><div><button v-for="result in results" :key="result.id" type="button" :aria-label="`选择作品 ${result.name}`" @click="select(result.id)"><img :src="`/api/editor/results/${result.id}/file`" :alt="result.name" /><span>{{ result.name }}</span></button></div></div>
       <div v-if="!selected" class="canvas-empty"><Image :size="38" :stroke-width="1" /><h3>{{ loading ? '正在读取作品…' : activeExecution ? '正在制作你的作品' : '从一个想法，开始创作' }}</h3><p v-if="activeExecution">生成与检查完成后，作品会出现在这里。<br />可以在左侧查看进度或停止当前任务。</p><p v-else>在左侧描述需求，确认方案后开始生成。<br />作品会进入画板，支持继续创作、编辑和下载。</p></div>
     </div>
@@ -537,7 +571,7 @@ onUnmounted(() => { saveScene().catch(() => {}); ++version; if (sceneTimer) clea
 .selected-actions { position: absolute; bottom: calc(100% + 10px); left: 50%; transform: translateX(-50%); z-index: 4; display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 4px; width: max-content; max-width: min(580px, 58vw); padding: 5px 8px; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; box-shadow: var(--shadow); white-space: nowrap; button { gap: 5px; color: var(--text-secondary); font-size: 12px; line-height: 17.6px; } }
 .canvas-toolbar, .selected-actions { :deep(svg) { stroke-width: 1.7; } }
 .text-placement { position: absolute; inset: 0; z-index: 2; cursor: text; touch-action: none; }
-.text-entry { position: absolute; left: 50%; bottom: 12px; transform: translateX(-50%); z-index: 5; width: min(320px, 100%); display: flex; gap: 6px; padding: 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); box-shadow: var(--shadow); textarea { min-width: 0; flex: 1; padding: 5px; border: 1px solid var(--border); font: inherit; resize: vertical; } }
+.text-entry { position: absolute; transform: translateX(-50%); z-index: 5; display: flex; gap: 6px; padding: 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); box-shadow: var(--shadow); font-size: 13px; textarea { min-width: 0; max-height: 120px; flex: 1; padding: 5px; border: 1px solid var(--border); font: inherit; resize: vertical; } }
 .tool-menu { position: relative; font-size: 12px; > div { position: absolute; top: calc(100% + 8px); right: 0; display: grid; min-width: 115px; padding: 5px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; box-shadow: var(--shadow); } }
 .tool-settings { position: absolute; left: calc((100% + var(--conversation-width) + 20px) / 2); top: 50%; transform: translate(-50%, -50%); z-index: 6; display: grid; gap: 10px; width: 300px; padding: 18px; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; box-shadow: var(--shadow); font-size: 12px; label { display: grid; gap: 5px; } input, select, textarea { width: 100%; padding: 8px; border: 1px solid var(--border); border-radius: 6px; font: inherit; } > div { display: flex; justify-content: end; gap: 8px; } }
 .tool-status { position: absolute; z-index: 2; right: 16px; bottom: 148px; width: min(360px, calc(100% - var(--conversation-width) - 40px)); padding: 6px 12px; background: var(--surface); font-size: 12px; line-height: 1.7; border: 1px solid var(--border); border-radius: 10px; box-shadow: var(--shadow); header { display: flex; justify-content: space-between; align-items: center; } article { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 3px 0; } p { flex: 1; color: var(--error); } button { padding: 3px 7px; text-decoration: none; &:hover { text-decoration: underline; } } &.expanded { z-index: 7; max-height: 50%; overflow: auto; } }

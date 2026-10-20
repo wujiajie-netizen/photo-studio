@@ -6,9 +6,9 @@ import { request } from '../api';
 import BrandPresetPicker from './BrandPresetPicker.vue';
 import CreationPresetPanel from './CreationPresetPanel.vue';
 
-const props = defineProps<{ taskId: string; execution?: AgentExecution; active: boolean; loading: boolean; initialSource: string | null }>();
+const props = defineProps<{ taskId: string; execution?: AgentExecution; active: boolean; loading: boolean; initialSource: string | null; initialProject?: string | null }>();
 const emit = defineEmits<{ started: [execution: AgentExecution]; ready: [] }>();
-const steps = ref<AgentStepInput[]>([]); const assetId = ref<string | null>(props.initialSource); const projectId = ref<string | null>(null);
+const steps = ref<AgentStepInput[]>([]); const assetId = ref<string | null>(props.initialSource); const projectId = ref<string | null>(props.initialProject ?? null);
 const assets = ref<ProductAsset[]>([]); const projects = ref<Project[]>([]); const optionsOpen = ref(false);
 const preparing = ref(false); const submitting = ref(false); const uploading = ref(false); const error = ref('');
 const busy = computed(() => submitting.value || !!props.execution && ['queued', 'running'].includes(props.execution.status));

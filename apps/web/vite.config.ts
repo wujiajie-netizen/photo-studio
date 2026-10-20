@@ -9,7 +9,8 @@ export default defineConfig({
   server: {
     port: 5173,
     strictPort: true,
-    proxy: { '/api': 'http://127.0.0.1:3000' }
+    /* 保留浏览器访问的 Host，让后端来源校验与前端 Origin 一致。 */
+    proxy: { '/api': { target: 'http://127.0.0.1:3000', changeOrigin: false } }
   },
   preview: { host: '127.0.0.1', port: 4173, strictPort: true }
 });

@@ -276,7 +276,22 @@ def foreground(rgba, models, validation_mask=None):
     return np.rint(alpha * rgba[:, :, 3]).astype(np.uint8)
 
 
-def object_mask(predictor, masks, scores, matte, region, context_bounds, minimum_confidence=.9):
+def truncated_contour(contour, rgb, region):
+    x, y, wide, tall = [region[key] for key in ("x", "y", "width", "height")]
+    seed = contour[y:y + tall, x:x + wide]
+    edges = []
+    if x > 0:
+        edges.append((seed[:, 0], contour[y:y + tall, x - 1], rgb[y:y + tall, x], rgb[y:y + tall, x - 1]))
+    if x + wide < rgb.shape[1]:
+        edges.append((seed[:, -1], contour[y:y + tall, x + wide], rgb[y:y + tall, x + wide - 1], rgb[y:y + tall, x + wide]))
+    if y > 0:
+        edges.append((seed[0], contour[y - 1, x:x + wide], rgb[y, x:x + wide], rgb[y - 1, x:x + wide]))
+    if y + tall < rgb.shape[0]:
+        edges.append((seed[-1], contour[y + tall, x:x + wide], rgb[y + tall - 1, x:x + wide], rgb[y + tall, x:x + wide]))
+    return any(np.count_nonzero((inner > 0) & (outer == 0) & (np.max(np.abs(inside_color.astype(int) - outside_color.astype(int)), axis=1) < 10)) > max(4, len(inner) * .2) for inner, outer, inside_color, outside_color in edges)
+
+
+def object_mask(predictor, masks, scores, matte, region, context_bounds, minimum_confidence=.9, single_object=False, rgb=None):
     x, y, wide, tall = [region[key] for key in ("x", "y", "width", "height")]
     selected = int(np.argmax(scores))
     target = matte[y:y + tall, x:x + wide] > 100
@@ -287,10 +302,45 @@ def object_mask(predictor, masks, scores, matte, region, context_bounds, minimum
     best = int(np.argmax(agreements))
     left, top, right, bottom = x, y, x + wide, y + tall
     refined_body = False
-    # SAM 高分可能仅指向容器边缘；只有另一个候选与独立前景模型明显一致，才修正漏掉商品内部的结果。
-    incomplete = agreements[best] > .75 and agreements[best] - agreements[selected] > .2 and intersections[selected] / max(1, np.count_nonzero(target)) < .65
+    # SAM 高分可能仅指向容器边缘；替换候选必须基本位于本项范围，小物体也不以连着邻物的显著前景覆盖独立轮廓。
+    incomplete = not single_object and np.count_nonzero(candidates[best]) > np.count_nonzero(masks[best]) * .9 and agreements[best] > .75 and agreements[best] - agreements[selected] > .2 and intersections[selected] / max(1, np.count_nonzero(target)) < .65
     if incomplete:
         selected = best
+    truncated = single_object and rgb is not None and truncated_contour(masks[selected], rgb, region)
+    # 小物体候选夹带邻物碎片时，以主体内部点和碎片排除点再分割一次；不扩框，也不让后续显著性连通域重新合并邻物。
+    if single_object:
+        _, parts, part_stats, _ = cv2.connectedComponentsWithStats(masks[selected].astype(np.uint8))
+        ordered = np.argsort(part_stats[1:, cv2.CC_STAT_AREA])[::-1] + 1
+        if len(ordered) and part_stats[ordered[0], cv2.CC_STAT_AREA] > np.count_nonzero(masks[selected]) * .75:
+            substantial = [part for part in ordered if part_stats[part, cv2.CC_STAT_AREA] > max(16, part_stats[ordered[0], cv2.CC_STAT_AREA] * .05)]
+            if 0 < len(substantial) <= 8:
+                points = []
+                for part in substantial:
+                    distance = cv2.distanceTransform((parts == part).astype(np.uint8), cv2.DIST_L2, 5)
+                    row, column = np.unravel_index(np.argmax(distance), distance.shape)
+                    points.append([column, row])
+                body = parts == substantial[0]
+                point_labels = [1, *([0] * (len(points) - 1))]
+                # 单点可能只指向豆子沟槽等内部细节；低分且前景模型支持的种子，用分散的内部点重新确认完整物体。
+                if len(points) == 1 and (float(scores[selected]) < minimum_confidence or truncated) and np.count_nonzero(body) > max(16, wide * tall * .2) and np.count_nonzero(body[y:y + tall, x:x + wide]) > np.count_nonzero(body) * .9 and np.count_nonzero(body & (matte > 100)) > np.count_nonzero(body) * .95:
+                    distance = cv2.distanceTransform(body.astype(np.uint8), cv2.DIST_L2, 5)
+                    core = distance > max(2, distance.max() * .3)
+                    rows, columns = np.indices(body.shape)
+                    for _ in range(3):
+                        separation = np.min(np.stack([(columns - point[0]) ** 2 + (rows - point[1]) ** 2 for point in points]), axis=0)
+                        row, column = np.unravel_index(np.argmax(np.where(core, separation, 0)), distance.shape)
+                        if separation[row, column] < 4 or not core[row, column]:
+                            break
+                        points.append([column, row])
+                        point_labels.append(1)
+                if len(points) > 1:
+                    refined, refined_scores, _ = predictor.predict(point_coords=np.array(points), point_labels=np.array(point_labels), multimask_output=True)
+                    eligible = [choice for choice in range(len(refined)) if all(bool(refined[choice, point[1], point[0]]) == bool(label) for point, label in zip(points, point_labels)) and np.count_nonzero(refined[choice].astype(bool) & body) > np.count_nonzero(body) * .9 and (rgb is None or not truncated_contour(refined[choice], rgb, region))]
+                    if eligible:
+                        choice = max(eligible, key=lambda value: float(refined_scores[value]))
+                        if float(refined_scores[choice]) > max(minimum_confidence, 0 if truncated else float(scores[selected])):
+                            masks, scores, selected = refined, refined_scores, choice
+                            refined_body = True
     # 高置信轮廓使用实际边界，语义框仅用于定位，避免略小的包围框把杯碟或商品边沿截断。
     if float(scores[selected]) >= minimum_confidence:
         left, top, right, bottom = context_bounds
@@ -300,7 +350,7 @@ def object_mask(predictor, masks, scores, matte, region, context_bounds, minimum
     component = int(np.argmax(inside))
     area = int(stats[component, cv2.CC_STAT_AREA]) if component else 0
     # 语义框用于定位；只有框内细化前景明确属于同一物体，才允许真实轮廓延展。横跨多个物体的近似框不猜主体。
-    if area and inside[component] / max(1, np.count_nonzero(target)) > .9 and inside[component] / area > .4:
+    if not refined_body and area and inside[component] / max(1, np.count_nonzero(target)) > .9 and inside[component] / area > .4:
         body = labels == component
         overlap = np.count_nonzero(masks[selected].astype(bool) & body)
         original = overlap / max(1, np.count_nonzero(masks[selected].astype(bool) | body))
@@ -371,36 +421,26 @@ def split(rgba, objects, models, directory):
                 full_matte[top:bottom, left:right] = matte
                 if detailed:
                     local_region = {**region, "x": x - left, "y": y - top}
-                    contour, confidence, refined_body = object_mask(detail_predictor, local_masks, scores, matte, local_region, (0, 0, right - left, bottom - top), minimum_confidence=.85)
+                    contour, confidence, refined_body = object_mask(detail_predictor, local_masks, scores, matte, local_region, (0, 0, right - left, bottom - top), minimum_confidence=.85, single_object=True, rgb=rgba[top:bottom, left:right, :3])
                     seed = contour[y - top:y + tall - top, x - left:x + wide - left]
                     # 低置信轮廓贴着语义框时交给范围纠正，不能截成碎片后显示处理成功。
                     if confidence < .85 and (np.any(seed[:, 0]) and x > 0 or np.any(seed[:, -1]) and x + wide < width or np.any(seed[0]) and y > 0 or np.any(seed[-1]) and y + tall < height):
                         raise LayerSegmentationError(region["name"], f"第 {index + 1} 个元素边沿被范围截断：{region['name']}，请覆盖完整可见轮廓。")
                     # 即使模型分数高，框边长段透明截断而原图颜色连续，也不能冒充完整物体轮廓。
-                    edges = []
-                    if x > 0:
-                        edges.append((seed[:, 0], contour[y - top:y + tall - top, x - left - 1], rgba[y:y + tall, x, :3], rgba[y:y + tall, x - 1, :3]))
-                    if x + wide < width:
-                        edges.append((seed[:, -1], contour[y - top:y + tall - top, x + wide - left], rgba[y:y + tall, x + wide - 1, :3], rgba[y:y + tall, x + wide, :3]))
-                    if y > 0:
-                        edges.append((seed[0], contour[y - top - 1, x - left:x + wide - left], rgba[y, x:x + wide, :3], rgba[y - 1, x:x + wide, :3]))
-                    if y + tall < height:
-                        edges.append((seed[-1], contour[y + tall - top, x - left:x + wide - left], rgba[y + tall - 1, x:x + wide, :3], rgba[y + tall, x:x + wide, :3]))
-                    for inner, outer, inside_color, outside_color in edges:
-                        cut = (inner > 0) & (outer == 0) & (np.max(np.abs(inside_color.astype(int) - outside_color.astype(int)), axis=1) < 10)
-                        if np.count_nonzero(cut) > max(4, len(inner) * .2):
-                            raise LayerSegmentationError(region["name"], f"第 {index + 1} 个元素在范围边缘被切断：{region['name']}，请扩大框覆盖完整可见物体。")
+                    if truncated_contour(contour, rgba[top:bottom, left:right, :3], local_region):
+                        raise LayerSegmentationError(region["name"], f"第 {index + 1} 个元素在范围边缘被切断：{region['name']}，请扩大框覆盖完整可见物体。")
                     clipped = np.zeros((height, width), np.uint8)
                     clipped[top:bottom, left:right] = contour
                     # 一个小元素不能同时混入邻近物体；不把多个不相连的主体保存成一层碎片。
                     _, _, parts, _ = cv2.connectedComponentsWithStats(contour)
-                    if np.count_nonzero(parts[1:, cv2.CC_STAT_AREA] > max(16, np.count_nonzero(contour) * .15)) > 1:
+                    if np.count_nonzero(parts[1:, cv2.CC_STAT_AREA] > max(16, np.count_nonzero(contour) * .05)) > 1:
                         raise LayerSegmentationError(region["name"], f"第 {index + 1} 个元素包含多个不相连的物体：{region['name']}，请定位单个完整对象。")
                 else:
                     clipped, confidence, refined_body = object_mask(predictor, masks, scores, full_matte, region, (left, top, right, bottom))
-                coverage = np.count_nonzero((full_matte > 100) & (clipped > 0)) / max(1, np.count_nonzero(clipped))
-                # 可靠轮廓已定位但显著性偏向局部时，隔离邻物后只细化一次；不可靠背景碎片不能据此伪装为物体。
-                if (confidence >= (.85 if detailed else .9) and coverage < (.8 if detailed else .3)) or (refined_body and confidence > .85 and coverage < .9):
+                foreground_inside = np.count_nonzero((full_matte > 100) & (clipped > 0))
+                coverage = foreground_inside / max(1, np.count_nonzero(clipped))
+                # 可靠轮廓已定位但显著性偏向局部或邻物时，隔离邻物后只细化一次；透明物体自身低透明度不据此强行补实。
+                if (confidence >= (.85 if detailed else .9) and (coverage < (.8 if detailed else .3) or coverage < .9 and np.count_nonzero(full_matte > 100) > foreground_inside * 2)) or (refined_body and confidence > .85 and coverage < .9):
                     isolated = rgba[top:bottom, left:right].copy()
                     support = cv2.dilate(clipped[top:bottom, left:right], cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7)))
                     isolated[support == 0, :3] = 245

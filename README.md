@@ -1,6 +1,6 @@
 # Photo Studio
 
-面向电商用户的本地 PC Web AI 视觉生产工作台，提供 Agent 对话、商品图、商品套图、详情页、多画板编辑、图片工具和本地项目资产。
+面向电商用户的本地 PC Web AI 视觉生产工作台，提供 Agent 对话、商品图、商品套图、详情页、多画板编辑、图片工具和本地项目资产。支持邀请制账号，可通过 HTTPS 内网穿透供少量用户使用，本机继续执行 Codex CLI。
 
 ## 本地启动
 
@@ -13,6 +13,51 @@
 首次启动安装锁定依赖并启动前后端，打开 [本地工作台](http://127.0.0.1:5173)。也可手动执行 `npm ci` 后使用 `npm run dev`。按 Ctrl+C 停止，或在另一个终端执行 `.\scripts\stop.ps1`。
 
 服务仅监听本机，前端端口 5173、后端端口 3000。SQLite、上传、生成、导出和任务文件保存在 `data/`，不提交版本库；可通过 `PHOTO_STUDIO_DATA_DIR` 指定业务数据目录，启动器进程记录仍保存在项目 `data/` 下。
+
+## 邀请制账号
+
+工作台使用账号密码登录弹窗；不开放公众注册、短信或第三方登录。首次编译后，在项目根目录的另一个交互终端创建账号：
+
+```powershell
+npm run accounts -- create admin --admin
+npm run accounts -- create friend
+```
+
+密码在终端输入两次，不回显、不进入命令参数，长度为 6–30 个字符。账号使用 3–32 位英文字母、数字、下划线或短横线，不区分大小写。首次必须创建管理员，现有 `app.db`、项目、素材和对话全部归该管理员，旧文件不搬移；后续账号从空白空间开始，业务数据位于 `data/users/<账号编号>/`，账号与会话保存在 `data/accounts.db`。
+
+```powershell
+npm run accounts -- list
+npm run accounts -- reset-password friend
+npm run accounts -- disable friend
+```
+
+重置密码或停用账号会撤销原登录会话；不能停用最后一个管理员。命令和服务必须使用相同的 `PHOTO_STUDIO_DATA_DIR`。请备份整个数据目录，包括各账号数据库、文件和 `accounts.db`。
+
+## 本机 HTTPS 试用部署
+
+生产构建由 NestJS 同源提供前端页面和 `/api`，无需对外提供 Vite 开发服务。构建完成并创建管理员后，在服务所在终端设置真实入口域名并运行：
+
+```powershell
+npm run build
+$env:PHOTO_STUDIO_PUBLIC_ORIGIN = 'https://studio.example.com'
+npm run start -w @photo-studio/server
+```
+
+将示例域名换成实际 HTTPS 入口；内网穿透指向 `http://127.0.0.1:3000`，保留请求原始 Host 或传入上述配置对应的 Origin。该配置用于校验写操作来源并启用 Secure Cookie，域名变化后要同步修改并重启服务。SSE 需要关闭代理缓冲和缓存，并允许长连接；入口上传限制至少允许 20 MB 图片及 multipart 开销。不要直接对外暴露源码、`data/` 或开发端口。
+
+没有域名时，可先使用 localhost.run 免费 HTTPS 地址进行小范围试用。先执行 `npm run build` 并创建管理员，停止本地开发服务后启动：
+
+```powershell
+.\scripts\stop.ps1
+.\scripts\start-online.ps1
+Get-Content .\data\deployment\status.json
+```
+
+`status.json` 的 `url` 是当前公网入口。后台以当前 Windows 用户运行生产构建，服务监听 `127.0.0.1:3199`，通过 SSH 加密隧道转发；来源校验和 Secure Cookie 自动使用分配的 HTTPS 域名，继续使用该用户已登录的 Codex CLI。后台自动重连隧道、重启异常退出的服务，域名变化后需使用最新地址重新登录。停止执行 `.\scripts\stop-online.ps1`，日志在 `data/deployment/online.stdout.log` 与 `online.stderr.log`。线上运行期间先停止线上服务再启动开发服务，避免同一份数据由多个执行器运行。
+
+免费入口会限速且域名可能变化，不保证持续可用。当前公网实测约 1 MB 上传用时约 25 秒，约 20 MB 上传在三分钟测试期限内未完成；上传请求允许等待十分钟，实际速度取决于入口限流。正式长期使用建议迁移到固定域名隧道。Windows 登录后启动可通过当前用户计划任务调用 `scripts/start-online.ps1`；运行状态和地址以 `status.json` 为准。
+
+各账号业务服务和文件独立，Codex 规划、生图与图片处理共用进程内串行队列，继续使用本机 ChatGPT 登录与现有模型配置。每日个人额度、队列名次、磁盘自动清理和定时备份尚未实现，见 [剩余事项](handoff.md)。
 
 ## 模型与图片工具
 

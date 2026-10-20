@@ -1,5 +1,19 @@
 # 技术架构
 
+## 邀请制账号与本机共享
+
+2026-10-10 增加本机常开、HTTPS 内网穿透的小范围邀请制使用。生产入口统一由 `createAuthenticatedApp` 提供，默认监听 `127.0.0.1:3000`，免域名试用启动器监听 `127.0.0.1:3199`；直接提供 `apps/web/dist` 静态构建和 SPA 路由，`/api/auth/session`、`POST /api/auth/login`、`POST /api/auth/logout` 管理网站会话。匿名健康检查只返回服务状态，不返回本机目录。其余业务入口先验证网站会话，包含文件下载、导出和 SSE；本地 CLI 和模型环境状态仅管理员可查。
+
+`scripts/online.mjs` 使用系统 SSH 与 localhost.run 建立免费 HTTPS 隧道，不读取用户 SSH 私钥。启动器解析实际分配域名后设置 `PHOTO_STUDIO_PUBLIC_ORIGIN`，通过子进程运行生产服务；异常退出自动重启，隧道断线自动重连，域名变化时关闭旧服务后切换来源。启停、状态与日志位于 `data/deployment`；同时运行开发服务会被拒绝，避免同一数据目录有多个模型执行器。浏览器在公网 HTTP 页面加载时先转 HTTPS，正式 HTTPS 响应提供 HSTS 与 Secure Cookie。免费入口会限速与换域名，当前只用于小范围试用。
+
+`accounts.db` 保存 users、login_sessions 与 login_attempts。账号密码使用独立随机盐和 scrypt 派生；七天会话只保存随机 token 的 SHA256，浏览器通过 HttpOnly、SameSite=Lax、Path=/api Cookie 持有原 token。`PHOTO_STUDIO_PUBLIC_ORIGIN` 配置正式 HTTPS 入口时启用 Secure Cookie；写操作要求应用请求头并校验 Origin。账号或来源连续登录失败触发十五分钟限制。退出立即撤销 token 并关闭对应 SSE；重置或停用撤销所有会话，已有 SSE 最迟三十秒内关闭。
+
+为沿用现有业务结构，每个账号按需初始化并缓存独立的 `AppModule.forWorkspace`，拥有自己的 SQLite、业务队列、事件流、文件目录和 Codex 提供者。首次本机命令创建的管理员使用原数据根目录，保留全部旧项目、素材和对话；后续账号使用 `users/<userId>/`，不复制旧数据。请求不会把客户端账号编号作为目录来源；跨账号引用项目、素材、作品、画布或任务时，在当前账号数据库中找不到目标，按现有规则返回不存在。服务退出先关闭 SSE 和账号任务，再关闭数据库。
+
+所有账号的提供者通过同一个 `CodexCallQueue` 串行执行规划、生图与图片处理，队列上限为一百项；等待阶段的取消不会启动 CLI。该串行调度不改变 `AgentModelProvider` 的调用边界、Codex ChatGPT 登录或模型选择，也不引入 Redis、Docker 或 API Key。每个已使用账号保留一份业务服务实例，适用于当前少量邀请用户；个人日额度、全局队列名次和磁盘配额另行实现。
+
+账号管理仅提供本机交互命令，密码不回显、不写入命令参数。网站不提供公开注册、密码重置或管理账号接口，避免开放初始化入口。前端统一登录弹窗，提交动作登录成功后继续，取消登录保留原输入；过期会话保留当前创作内容等待重新认证，换成其他账号或退出后重新加载页面，清除旧缓存和订阅。
+
 ## 本地图片编辑
 
 当前 `codex/local-image-layer-tools` 分支保留整图生成，本地模型处理识字、抠图和拆层。商品图、套图、详情模块与复杂改图仍由 Codex 内置生图执行。`AgentModelProvider.processImage` 统一调度本地专用工具：PaddleOCR 的 PP-OCRv5 ONNX（RapidOCR）、BiRefNet、SAM 2.1 和 LaMa；业务层不读取模型原始输出。识字和抠图不调用 Codex；拆层清字后通常做一次 Codex 前景语义分组，再在本地提取像素和修复背景。不可靠物体范围由本地工具返回严格校验的分割失败信息，提供者转换为 `LayerSegmentationError`，应用最多追加一次语义范围纠正；再次失败不保存结果。环境错误、取消和其他异常不触发该纠正，不逐层生图生成蒙版。
@@ -9,6 +23,8 @@
 字体从编辑器已有白名单估算匹配，不保证恢复原字体。残字检测通过不代表视觉无接缝；透明材质、复杂投影、重叠遮挡及大面积背景补全必须单独验收。具体安装和验证见 `local-image-tools.md`。
 
 ## 创作场景与编辑文档
+
+`POST /api/projects/:id/creation` 接收可选 `resultId`，校验作品属于当前项目，返回 `{ sessionId, projectId, resultId }`。单图优先恢复未删除的来源对话，项目入口恢复最近相关对话，无记录时创建空白会话；不提交规划或生图任务。`agent_sessions.project_id` 为可空默认保存项目，旧库补列，项目删除时解除外键；共享类型字段为 `AgentSession.projectId`。创作入口携带 `session`、`project` 和可选 `result` 查询参数，读取当前项目作品并复用已有 EditorDocument。画板保存与图片工具允许引用会话执行作品及关联项目作品；新执行优先使用显式项目、会话默认项目，再沿用历史执行项目。
 
 每个作品继续使用现有 EditorDocument；同页和独立编辑器共用图片、素材、文字、形状、画笔、调色和自动保存。CreationScene 独立保存会话内画板 `{ resultId, x, y }`、视口 `{ x, y, zoom }`、selectedId 与 revision，SQLite `creation_scenes` 以 session_id 为主键。GET/PATCH `/api/editor/scenes/:sessionId` 校验所属会话与有限坐标；版本冲突拒绝覆盖，相同已保存重发返回当前值。
 
@@ -113,12 +129,16 @@ LangGraph 保存业务状态并控制节点转换；Codex CLI 负责需求理解
 
 ## 本地持久化
 
+单图删除在事务内重新统计项目图片数量，最后一张要求请求明确携带 `{ deleteProjectWhenEmpty: true }`；未确认时拒绝删除并要求页面重新确认。确认后复用整个项目的删除流程，同步删除关联对话；接口返回 `{ id, projectDeleted }`，页面据此返回项目列表。多图时只删除指定图片，确认标记不会扩大为整个项目删除。
+
+项目资产删除采用数据库物理删除，不新增删除标记。`DELETE /api/projects/:id` 通过 `agent_executions` 与作品任务定位关联对话，在同一事务内删除项目、图片、编辑文档、关联对话及其消息、布局与执行记录；共享其他项目的对话或图片拒绝删除。`DELETE /api/projects/:id/results/:resultId` 只删除属于该项目的单张图片和编辑文档，同步清理画板、图片工具输出及套图模块引用，保留对话和项目。`DELETE /api/assets/:id` 删除素材记录并解除历史任务素材外键；正在使用的素材或仍被编辑图层引用的素材拒绝删除。删除前检查活动任务和跨作品引用，失败整体回滚。此轮删除范围是数据库记录，本地文件清理不随接口执行。
+
+会话管理沿用 `agent_sessions`，新增可空 `pinned_at`、`deleted_at`，接口字段为 `pinnedAt`、`deletedAt`；旧库事务补列，原消息、任务及作品引用保留。`PATCH /api/agent/sessions/:id` 接收 `{ title }`，名称为 1–80 个字符。`POST /api/agent/sessions/actions` 接收 `{ ids: string[], action: 'pin' | 'unpin' | 'delete' }`，整批验证并事务写入；删除拒绝仍有规划、生成或图片工具任务进行中的会话。列表优先展示置顶会话，过滤已删除记录；删除后不能继续读取或提交对话，项目与作品保留。
+
 - SQLite 保存项目、会话、任务、步骤和资源索引。
 - 文件系统保存上传文件、生成结果和导出文件。
 - 任务状态先落库再推送前端，保证刷新后可恢复。
 - 本地任务执行器控制并发、取消和失败重试，不依赖 Redis。
-
-新增业务表和字段须先确认，禁止为了预留扩展而添加未使用字段。
 
 `ProductImageParameters.sourceAssetId`、`CommerceParameters.sourceAssetId` 与执行提交 `projectId` 允许为 `null`；已保存 `AgentExecution.projectId` 仍为真实项目编号。`POST /api/agent/tasks/:id/parameters` 接收 `{ sourceAssetId: string | null }`，经统一提供者返回 `{ steps: AgentStepInput[] }`，服务校验工具、标题、顺序、素材与数量后保存到运行目录。草案按计划及素材复用；切换页面可取消请求，生成需单独确认。原规划 `AgentResult` 保持现有结构，旧会话无需改写。
 

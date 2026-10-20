@@ -1,16 +1,18 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue';
+import { computed, ref, watch } from 'vue';
 import { useRoute } from 'vue-router';
 import { ArrowUpRight, Sparkles, Image, Layers3, PanelsTopLeft, FolderOpen, Plus, ArrowRight, WandSparkles, LockKeyhole } from '@lucide/vue';
 import AgentWorkspace from '../components/AgentWorkspace.vue';
 import ProjectCards from '../components/ProjectCards.vue';
 import { useProjectsStore } from '../stores/projects';
+import { useAuthStore } from '../stores/auth';
 
 const prompt = ref('');
 const route = useRoute();
 const conversation = computed(() => typeof route.query.session === 'string');
 const projects = useProjectsStore();
-onMounted(() => { projects.load(); });
+const auth = useAuthStore();
+watch(() => auth.user?.id, id => { if (id) projects.load(); }, { immediate: true });
 const suggestions = ['制作一张高级感商品图', '生成一套统一风格的套图', '把商品卖点变成详情页'];
 const tools = [
   { path: '/product-image', title: 'AI 商品图', caption: '一张原图，无限种可能', icon: Image, label: 'AI PHOTOGRAPHY', style: 'image', image: '/images/studio-fashion.webp' },
@@ -66,7 +68,8 @@ function useInspiration(value: string) {
 
     <section v-if="!conversation" class="recent-section" aria-labelledby="recent-title">
       <div class="section-heading"><div><h2 id="recent-title">最近项目</h2><p>每一次创作，都可以从这里继续</p></div><RouterLink to="/projects">查看全部 <ArrowRight :size="14" /></RouterLink></div>
-      <div v-if="projects.loading" class="empty-state" role="status"><p>正在读取最近项目…</p></div>
+      <div v-if="!auth.user" class="empty-state"><FolderOpen :size="29" :stroke-width="1.2" /><h3>你的作品，在这里继续</h3><p>登录后查看自己的项目与素材。</p><button type="button" class="button secondary" @click="auth.show()">登录查看项目</button></div>
+      <div v-else-if="projects.loading" class="empty-state" role="status"><p>正在读取最近项目…</p></div>
       <div v-else-if="projects.error" class="empty-state" role="alert"><h3>最近项目读取失败</h3><p>{{ projects.error }}</p><button type="button" class="button secondary" @click="projects.load()">重新读取</button></div>
       <ProjectCards v-else-if="projects.projects.length" :projects="projects.projects.slice(0, 3)" />
       <div v-else class="empty-state"><FolderOpen :size="29" :stroke-width="1.2" /><h3>第一份作品，从这里开始</h3><p>当前还没有项目。项目与素材会保存在本机，方便你继续创作。</p><RouterLink to="/projects" class="button secondary"><Plus :size="15" /> 创建第一个项目</RouterLink></div>
@@ -89,7 +92,7 @@ function useInspiration(value: string) {
 .poster-back { top: 8px; left: 66px; transform: rotate(-12deg); animation: poster-drift 6s ease-in-out infinite; }
 .poster-front { top: 25px; left: 207px; transform: rotate(10deg); animation: poster-drift 6s -3s ease-in-out infinite; }
 .stage-sticker { position: absolute; bottom: 0; left: 119px; display: inline-flex; align-items: center; gap: 7px; padding: 9px 14px; border: 1px solid #fff; border-radius: 30px; color: #7755bc; background: rgb(255 255 255 / 90%); box-shadow: 0 6px 18px rgb(84 58 135 / 8%); font-size: 11px; transform: rotate(-4deg); }
-.suggestions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 14px; font-size: 11px; > span { color: var(--muted); margin-right: 2px; } button { display: inline-flex; gap: 6px; align-items: center; color: var(--text-secondary); border: 1px solid rgb(255 255 255 / 70%); background: rgb(255 255 255 / 60%); padding: 5px 10px; border-radius: 30px; &:hover { color: var(--accent); background: white; box-shadow: 0 3px 10px rgb(119 85 232 / 7%); } } }
+.suggestions { display: flex; justify-content: center; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 14px; font-size: 11px; > span { color: var(--muted); margin-right: 2px; } button { display: inline-flex; gap: 6px; align-items: center; color: var(--text-secondary); border: 1px solid rgb(255 255 255 / 70%); background: rgb(255 255 255 / 60%); padding: 5px 10px; border-radius: 30px; &:hover { color: var(--accent); background: white; box-shadow: 0 3px 10px rgb(119 85 232 / 7%); } } }
 .tools-section, .inspiration-section, .recent-section { margin-top: 36px; }
 .heading-dot { color: var(--accent); margin-left: 3px; }
 .subtle-label { display: inline-flex; gap: 7px; align-items: center; color: var(--muted); font-size: 10px; letter-spacing: .5px; }

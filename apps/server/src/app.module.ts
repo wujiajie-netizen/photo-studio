@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Module, type DynamicModule } from '@nestjs/common';
 import { AppController } from './app.controller';
 import { StorageService } from './storage.service';
 import { ProjectsController } from './projects.controller';
@@ -22,6 +22,7 @@ import { ImageToolService } from './image-tool.service';
 import { ImageToolController } from './image-tool.controller';
 import { PresetsController } from './presets.controller';
 import { PresetsService } from './presets.service';
+import { CodexCallQueue, QueuedModelProvider } from './codex-call-queue';
 
 @Module({
   controllers: [AppController, ProjectsController, CodexController, AgentController, ProductImageController, CommerceController, EditorController, ImageEngineController, AgentExecutionController, ImageToolController, PresetsController],
@@ -31,4 +32,14 @@ import { PresetsService } from './presets.service';
     useFactory: (storage: StorageService) => new CodexCliProvider(resolve(storage.dataDirectory, 'runs'))
   }]
 })
-export class AppModule {}
+export class AppModule {
+  static forWorkspace(directory: string, queue: CodexCallQueue): DynamicModule {
+    return {
+      module: AppModule,
+      providers: [
+        { provide: 'PHOTO_STUDIO_DATA_DIRECTORY', useValue: directory },
+        { provide: AGENT_MODEL_PROVIDER, inject: [StorageService], useFactory: (storage: StorageService) => new QueuedModelProvider(new CodexCliProvider(resolve(storage.dataDirectory, 'runs')), queue) }
+      ]
+    };
+  }
+}

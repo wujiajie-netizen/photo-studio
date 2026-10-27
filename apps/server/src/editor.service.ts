@@ -41,7 +41,21 @@ export class EditorService {
     const row = this.storage.database.prepare(`SELECT ${columns} FROM editor_documents WHERE id = ?`).get(id);
     if (!row) throw new NotFoundException('编辑文档不存在。');
     const result = this.images.result(row.resultId as string);
-    return { ...row, projectId: result.projectId, layers: JSON.parse(row.layers as string) } as unknown as EditorDocument;
+    const document = { ...row, projectId: result.projectId, layers: JSON.parse(row.layers as string) } as unknown as EditorDocument;
+    const base = document.layers.find(layer => layer.type === 'image' && layer.resultId === document.resultId && layer.name === '商品原图');
+    const productImage = this.storage.database.prepare('SELECT 1 FROM product_image_results WHERE id = ?').get(document.resultId);
+    if (productImage && base?.type === 'image') {
+      const coversCanvas = base.rotation === 0 && base.opacity === 1 && base.visible && base.x <= 0 && base.y <= 0 && base.x + base.width >= document.width && base.y + base.height >= document.height;
+      /* 历史整图若仍完整覆盖画布，只移除无用底色并固定；单层整图已被移出时恢复原始画幅。 */
+      if (coversCanvas || document.layers.length === 1) {
+        const layer = coversCanvas ? { ...base, locked: true } : { ...base, x: 0, y: 0, width: result.width, height: result.height, rotation: 0, opacity: 1, visible: true, locked: true };
+        if (document.background !== 'transparent' || JSON.stringify(layer) !== JSON.stringify(base)) {
+          document.background = 'transparent'; document.layers = document.layers.map(item => item.id === base.id ? layer : item); document.revision += 1; document.updatedAt = new Date().toISOString();
+          this.storage.database.prepare('UPDATE editor_documents SET background = ?, layers = ?, revision = ?, updated_at = ? WHERE id = ?').run(document.background, JSON.stringify(document.layers), document.revision, document.updatedAt, document.id);
+        }
+      }
+    }
+    return document;
   }
   exportResult(resultId: string): Promise<{ data: Buffer; width: number; height: number }> {
     return this.exportDocument(this.open(resultId));
@@ -56,12 +70,12 @@ export class EditorService {
     const saved = this.storage.database.prepare('SELECT id FROM editor_documents WHERE result_id = ?').get(resultId);
     if (saved) return this.document(saved.id as string);
     const now = new Date().toISOString();
-    const document: EditorDocument = { id: randomUUID(), resultId, projectId: result.projectId, name: result.name, width: result.width, height: result.height, background: '#ffffff', layers: [{ id: randomUUID(), type: 'image', name: '商品原图', resultId, x: 0, y: 0, width: result.width, height: result.height, rotation: 0, opacity: 1, visible: true, locked: false }], revision: 0, createdAt: now, updatedAt: now };
+    const document: EditorDocument = { id: randomUUID(), resultId, projectId: result.projectId, name: result.name, width: result.width, height: result.height, background: 'transparent', layers: [{ id: randomUUID(), type: 'image', name: '商品原图', resultId, x: 0, y: 0, width: result.width, height: result.height, rotation: 0, opacity: 1, visible: true, locked: true }], revision: 0, createdAt: now, updatedAt: now };
     this.storage.database.prepare('INSERT INTO editor_documents VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(document.id, resultId, document.projectId, document.name, document.width, document.height, document.background, JSON.stringify(document.layers), 0, now, now);
     return document;
   }
   save(id: string, input: unknown): EditorDocument {
-    this.document(id);
+    const document = this.document(id);
     if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).length !== 6) throw new BadRequestException('编辑内容或版本号无效。');
     const { revision, ...content } = input as EditorContent & { revision: number };
     if (!Number.isInteger(revision) || revision < 0) throw new BadRequestException('编辑版本号无效。');
@@ -74,6 +88,12 @@ export class EditorService {
         const original = this.images.asset(layer.matteSourceAssetId); const image = this.images.asset(layer.assetId);
         if (original.width !== image.width || original.height !== image.height) throw new BadRequestException('原素材与抠图修整图片尺寸必须一致。');
       }
+    }
+    const savedBase = document.layers.find(layer => layer.type === 'image' && layer.resultId === document.resultId && layer.name === '商品原图');
+    const fixed = savedBase?.type === 'image' && document.background === 'transparent' && savedBase.locked && savedBase.rotation === 0 && savedBase.opacity === 1 && savedBase.visible && savedBase.x <= 0 && savedBase.y <= 0 && savedBase.x + savedBase.width >= document.width && savedBase.y + savedBase.height >= document.height;
+    if (fixed) {
+      const base = content.layers.find(layer => layer.id === savedBase.id);
+      if (!base || base.type !== 'image' || base.resultId !== document.resultId || content.background !== 'transparent' || !base.locked || base.rotation !== 0 || base.opacity !== 1 || !base.visible || base.x > 0 || base.y > 0 || base.x + base.width < content.width || base.y + base.height < content.height) throw new BadRequestException('生成整图必须固定并完整覆盖画布。');
     }
     /* 带版本条件保存，防止其他窗口覆盖文档；冲突时保留客户端内容，用户可另行重新读取。 */
     const change = this.storage.database.prepare('UPDATE editor_documents SET name = ?, width = ?, height = ?, background = ?, layers = ?, revision = revision + 1, updated_at = ? WHERE id = ? AND revision = ?').run(content.name.trim(), content.width, content.height, content.background, JSON.stringify(content.layers), new Date().toISOString(), id, revision);

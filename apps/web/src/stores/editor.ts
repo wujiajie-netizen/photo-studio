@@ -12,6 +12,11 @@ export const useEditorStore = defineStore('editor', () => {
   const history = ref<EditorContent[]>([]); const position = ref(0);
   const dirty = computed(() => changes.value !== savedChanges.value);
   const layer = computed(() => content.value?.layers.find((item) => item.id === selected.value) ?? null);
+  const fixedCanvasImage = computed(() => {
+    const value = content.value?.layers.find(item => item.type === 'image' && item.resultId === document.value?.resultId && item.name === '商品原图');
+    if (!value || value.type !== 'image' || !content.value || !value.locked || value.rotation !== 0 || value.opacity !== 1 || !value.visible || value.x > 0 || value.y > 0 || value.x + value.width < content.value.width || value.y + value.height < content.value.height) return null;
+    return value;
+  });
   const canUndo = computed(() => position.value > 0); const canRedo = computed(() => position.value < history.value.length - 1);
   let version = 0; let timer: ReturnType<typeof setTimeout> | null = null;
   let pending: Promise<void> = Promise.resolve();
@@ -65,7 +70,7 @@ export const useEditorStore = defineStore('editor', () => {
     return pending;
   }
   function close() { ++version; if (timer) clearTimeout(timer); timer = null; }
-  return { document, content, selected, layer, loading, saving, error, dirty, canUndo, canRedo, load, commit, updateLayer, fitText, undo, redo, save, close };
+  return { document, content, selected, layer, fixedCanvasImage, loading, saving, error, dirty, canUndo, canRedo, load, commit, updateLayer, fitText, undo, redo, save, close };
 });
 
 if (import.meta.hot) import.meta.hot.accept(acceptHMRUpdate(useEditorStore, import.meta.hot));

@@ -28,7 +28,7 @@
 
 每个作品继续使用现有 EditorDocument；同页和独立编辑器共用图片、素材、文字、形状、画笔、调色和自动保存。CreationScene 独立保存会话内画板 `{ resultId, x, y }`、视口 `{ x, y, zoom }`、selectedId 与 revision，SQLite `creation_scenes` 以 session_id 为主键。GET/PATCH `/api/editor/scenes/:sessionId` 校验所属会话与有限坐标；版本冲突拒绝覆盖，相同已保存重发返回当前值。
 
-`generateImage` 返回 PNG 字节，生成结果先作为整张图片进入编辑文档，不携带模型原生文字、商品或形状图层。手动新增的设计元素直接保存为 EditorDocument 图层；原图中的文字和前景按需提取。`renderCommerceImage` 保存原始画面并返回图片、标题与文案图层；CommerceService 在同一事务创建结果与 EditorDocument。程序文字不是从生图模型取得的原生设计图层。
+`generateImage` 返回 PNG 字节，生成结果固定为编辑文档的整幅画布内容，不提供移动、缩放、隐藏、删除或额外底色，也不携带模型原生文字、商品或形状图层。手动新增的设计元素继续保存为可编辑的 EditorDocument 图层；原图中的文字和前景按需提取。`renderCommerceImage` 保存原始画面并返回图片、标题与文案图层；CommerceService 在同一事务创建结果与 EditorDocument，模块排版仍可保留自身背景。程序文字不是从生图模型取得的原生设计图层。
 
 浏览器编辑和服务端导出共用 `packages/editor/src/render.ts` 的 Konva 节点规则。服务端采用 CPU `@napi-rs/canvas` 画布处理图片、文字、形状、画笔、变换与调色；不调用模型。GET `/api/editor/results/:resultId/file` 输出最新保存的文档，原结果文件接口继续返回生成位图供图片图层使用，避免自引用。ZIP 和长图先读取所有模块的持久化文档快照，再串行渲染，长图按最大宽度居中拼接。不同窗口未保存的编辑不进入导出。
 

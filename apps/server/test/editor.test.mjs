@@ -44,8 +44,13 @@ test('editor preserves layers across restart, rejects stale revisions and invali
     }).then(asset => { wrongSizeAssetId = asset.id; return send('/product-image/tasks', { sourceAssetId: assetId, subject: 'keep', scene: 'white', description: '', ratio: '1:1', count: 1, quality: 'standard' }); })
     .then(({ body }) => wait(body.id)).then(({ body }) => { result = body[0]; return send('/editor/documents', { resultId: result.id }); })
     .then(({ body }) => {
-      document = body; assert.equal(document.revision, 0); assert.equal(document.layers[0].resultId, result.id);
-      content = { name: '编辑后的商品', width: 1024, height: 1024, background: '#fafafa', layers: [...document.layers, { id: randomUUID(), type: 'text', name: '卖点', x: 10, y: 20, width: 600, height: 100, rotation: 15, opacity: .8, visible: true, locked: false, text: '净含量 200 克', fontSize: 48, fontFamily: 'KaiTi', fill: '#202020', align: 'center' }], revision: 0 };
+      document = body; assert.equal(document.revision, 0); assert.equal(document.background, 'transparent'); assert.equal(document.layers[0].resultId, result.id); assert.equal(document.layers[0].locked, true);
+      const legacy = [{ ...document.layers[0], x: -2000, y: -100, locked: false }];
+      app.get(StorageService).database.prepare('UPDATE editor_documents SET background = ?, layers = ? WHERE id = ?').run('#ffffff', JSON.stringify(legacy), document.id);
+      return send('/editor/documents', { resultId: result.id });
+    }).then(({ body }) => {
+      document = body; assert.equal(document.revision, 1); assert.equal(document.background, 'transparent'); assert.equal(document.layers[0].x, 0); assert.equal(document.layers[0].y, 0); assert.equal(document.layers[0].locked, true);
+      content = { name: '编辑后的商品', width: 1024, height: 1024, background: 'transparent', layers: [...document.layers, { id: randomUUID(), type: 'text', name: '卖点', x: 10, y: 20, width: 600, height: 100, rotation: 15, opacity: .8, visible: true, locked: false, text: '净含量 200 克', fontSize: 48, fontFamily: 'KaiTi', fill: '#202020', align: 'center' }], revision: document.revision };
       const transform = { x: 40, y: 50, width: 200, height: 160, rotation: 20, opacity: .7, visible: true, locked: false };
       Object.assign(content.layers[1], { fontStyle: 'bold italic', textDecoration: 'underline', letterSpacing: 2, lineHeight: 1.3 });
       content.layers[0].adjustments = { brightness: .1, contrast: 20, saturation: -.3, blur: 2 };
@@ -53,17 +58,18 @@ test('editor preserves layers across restart, rejects stale revisions and invali
       content.layers[4].matteSourceAssetId = assetId;
       return send(`/editor/documents/${document.id}`, content, 'PATCH');
     }).then(({ status, body }) => {
-      assert.equal(status, 200); saved = body; assert.equal(saved.revision, 1); assert.deepEqual(saved.layers, content.layers);
+      assert.equal(status, 200); saved = body; assert.equal(saved.revision, content.revision + 1); assert.deepEqual(saved.layers, content.layers);
       return Promise.all([
         send(`/editor/documents/${document.id}`, content, 'PATCH').then(({ status }) => assert.equal(status, 409)),
-        send(`/editor/documents/${document.id}`, { ...content, revision: 1, layers: [{ ...content.layers[0], resultId: randomUUID() }] }, 'PATCH').then(({ status }) => assert.equal(status, 404)),
-        send(`/editor/documents/${document.id}`, { ...content, revision: 1, width: 0 }, 'PATCH').then(({ status }) => assert.equal(status, 400)),
-        send(`/editor/documents/${document.id}`, { ...content, revision: 1, extra: true }, 'PATCH').then(({ status }) => assert.equal(status, 400)),
-        send(`/editor/documents/${document.id}`, { ...content, revision: 1, layers: [{ ...content.layers[4], assetId: randomUUID() }] }, 'PATCH').then(({ status }) => assert.equal(status, 404)),
-        send(`/editor/documents/${document.id}`, { ...content, revision: 1, layers: [{ ...content.layers[4], matteSourceAssetId: randomUUID() }] }, 'PATCH').then(({ status }) => assert.equal(status, 404)),
-        send(`/editor/documents/${document.id}`, { ...content, revision: 1, layers: [{ ...content.layers[4], matteSourceAssetId: null }] }, 'PATCH').then(({ status }) => assert.equal(status, 400)),
-        send(`/editor/documents/${document.id}`, { ...content, revision: 1, layers: [{ ...content.layers[4], matteSourceAssetId: wrongSizeAssetId }] }, 'PATCH').then(({ status, body }) => { assert.equal(status, 400); assert.match(body.message, /尺寸/); }),
-        send(`/editor/documents/${document.id}`, { ...content, revision: 1, layers: [{ ...content.layers[3], points: [0, 0, 10] }] }, 'PATCH').then(({ status }) => assert.equal(status, 400)),
+        send(`/editor/documents/${document.id}`, { ...content, revision: saved.revision, layers: [{ ...content.layers[0], resultId: randomUUID() }] }, 'PATCH').then(({ status }) => assert.equal(status, 404)),
+        send(`/editor/documents/${document.id}`, { ...content, revision: saved.revision, width: 0 }, 'PATCH').then(({ status }) => assert.equal(status, 400)),
+        send(`/editor/documents/${document.id}`, { ...content, revision: saved.revision, layers: [{ ...content.layers[0], x: -2000, locked: false }, ...content.layers.slice(1)] }, 'PATCH').then(({ status, body }) => { assert.equal(status, 400); assert.match(body.message, /固定/); }),
+        send(`/editor/documents/${document.id}`, { ...content, revision: saved.revision, extra: true }, 'PATCH').then(({ status }) => assert.equal(status, 400)),
+        send(`/editor/documents/${document.id}`, { ...content, revision: saved.revision, layers: [{ ...content.layers[4], assetId: randomUUID() }] }, 'PATCH').then(({ status }) => assert.equal(status, 404)),
+        send(`/editor/documents/${document.id}`, { ...content, revision: saved.revision, layers: [{ ...content.layers[4], matteSourceAssetId: randomUUID() }] }, 'PATCH').then(({ status }) => assert.equal(status, 404)),
+        send(`/editor/documents/${document.id}`, { ...content, revision: saved.revision, layers: [{ ...content.layers[4], matteSourceAssetId: null }] }, 'PATCH').then(({ status }) => assert.equal(status, 400)),
+        send(`/editor/documents/${document.id}`, { ...content, revision: saved.revision, layers: [{ ...content.layers[4], matteSourceAssetId: wrongSizeAssetId }] }, 'PATCH').then(({ status, body }) => { assert.equal(status, 400); assert.match(body.message, /尺寸/); }),
+        send(`/editor/documents/${document.id}`, { ...content, revision: saved.revision, layers: [{ ...content.layers[3], points: [0, 0, 10] }] }, 'PATCH').then(({ status }) => assert.equal(status, 400)),
         send('/editor/documents', { resultId: result.id }).then(({ body }) => assert.deepEqual(body, saved))
       ]);
     }).then(() => app.close()).then(start).then(() => send(`/editor/documents/${document.id}`)).then(({ body }) => assert.deepEqual(body, saved))

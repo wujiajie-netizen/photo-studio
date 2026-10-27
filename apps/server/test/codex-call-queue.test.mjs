@@ -35,3 +35,25 @@ test('different account providers share one execution slot and cancelled waiting
     }).then(() => first.generateImage('after-failure', null, '', signal.signal))
     .then(() => { assert.equal(calls.at(-1), 'after-failure'); });
 });
+
+test('cancelled active streams release the shared queue even when the provider stream never closes', () => {
+  const queue = new CodexCallQueue(); const calls = [];
+  const provider = {
+    run(input) {
+      calls.push(input.taskId);
+      return { [Symbol.asyncIterator]: () => ({ next: () => new Promise(() => {}) }) };
+    },
+    generateImage(id) { calls.push(id); return Promise.resolve(Buffer.from(id)); },
+    cancel() { return Promise.resolve(); }
+  };
+  const queued = new QueuedModelProvider(provider, queue);
+  const iterator = queued.run({ taskId: 'stuck', prompt: '', schema: {} })[Symbol.asyncIterator]();
+  const events = [];
+  const collect = () => iterator.next().then(item => { if (!item.done) { events.push(item.value); return collect(); } });
+  return new Promise(resolve => setImmediate(resolve)).then(() => queued.cancel('stuck'))
+    .then(() => Promise.all([collect(), queued.generateImage('after-cancel', null, '', new AbortController().signal)]))
+    .then(() => {
+      assert.deepEqual(events, [{ type: 'cancelled' }]);
+      assert.deepEqual(calls, ['stuck', 'after-cancel']);
+    });
+});

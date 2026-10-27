@@ -13,7 +13,7 @@ export class CodexCliProvider implements AgentModelProvider {
 
   private readonly images: CodexImageRunner;
   private readonly localImages: LocalImageRunner;
-  constructor(private readonly runsDirectory: string) { this.images = new CodexImageRunner(runsDirectory); this.localImages = new LocalImageRunner(runsDirectory); }
+  constructor(private readonly runsDirectory: string, private readonly resolveModel: () => Promise<string>) { this.images = new CodexImageRunner(runsDirectory, resolveModel); this.localImages = new LocalImageRunner(runsDirectory); }
 
   run(input: AgentInput): AsyncIterable<AgentEvent> { return this.start(input); }
   continue(sessionId: string, input: AgentInput): AsyncIterable<AgentEvent> { return this.start(input, sessionId); }
@@ -45,9 +45,13 @@ export class CodexCliProvider implements AgentModelProvider {
       if (this.active.has(input.taskId)) throw new Error('该任务已在运行。');
       return inspectCodex();
     }).then((status) => {
-      this.preparing.delete(input.taskId);
       if (cancelled || stream.destroyed) { finish({ type: 'cancelled' }); return; }
       if (status.status !== 'ready') throw new Error(status.message);
+      return this.resolveModel();
+    }).then((model) => {
+      this.preparing.delete(input.taskId);
+      if (cancelled || stream.destroyed) { finish({ type: 'cancelled' }); return; }
+      if (!model || !/^[a-zA-Z0-9._-]{1,80}$/.test(model)) throw new Error('Codex 模型编号无效。');
       const executable = findCodexExecutable();
       if (!executable) throw new Error('未找到 Codex CLI。');
       const directory = resolve(this.runsDirectory, input.taskId);
@@ -57,7 +61,7 @@ export class CodexCliProvider implements AgentModelProvider {
       writeFileSync(schema, JSON.stringify(input.schema), 'utf8');
       writeFileSync(resolve(directory, 'input.txt'), input.prompt, 'utf8');
       const images = (input.images ?? []).map((image, index) => { const path = resolve(directory, `image-${index + 1}.png`); writeFileSync(path, image); return path; });
-      const args = ['exec', ...(sessionId ? ['resume', sessionId] : []), '--model', process.env.PHOTO_STUDIO_CODEX_MODEL || 'gpt-5.5', '--ignore-user-config', '--ignore-rules', '--skip-git-repo-check', '--json', '--output-schema', schema];
+      const args = ['exec', ...(sessionId ? ['resume', sessionId] : []), '--model', model, '--ignore-user-config', '--ignore-rules', '--skip-git-repo-check', '--json', '--output-schema', schema];
       for (const setting of ['sandbox_mode="read-only"', 'approval_policy="never"', 'web_search="disabled"', 'project_doc_max_bytes=0', 'features.shell_tool=false', 'features.unified_exec=false', 'features.plugins=false', 'features.apps=false', 'features.browser_use=false', 'features.computer_use=false', 'features.image_generation=false', 'features.in_app_browser=false', 'features.multi_agent=false', 'features.hooks=false', 'features.memories=false']) args.push('-c', setting);
       for (const image of images) args.push('--image', image);
       args.push('-');
@@ -74,8 +78,12 @@ export class CodexCliProvider implements AgentModelProvider {
       let totalBytes = 0;
       let stderrBytes = 0;
       const messages = new Map<string, string>();
-      const fail = (message: string) => { if (!failure) failure = message; child.kill(); };
-      const cancel = () => { cancelled = true; child.kill(); };
+      const stop = () => {
+        child.kill();
+        if (process.platform === 'win32' && child.pid) spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' }).once('error', () => {});
+      };
+      const fail = (message: string) => { if (!failure) failure = message; stop(); };
+      const cancel = () => { cancelled = true; stop(); };
       this.active.set(input.taskId, { child, cancel, closed });
       const timeout = setTimeout(() => fail('Agent 响应超时，请稍后重试。'), 180000);
       stream.once('close', () => { if (!terminal) cancel(); });
@@ -89,7 +97,7 @@ export class CodexCliProvider implements AgentModelProvider {
         } else if (event.type === 'turn.completed') completed = true;
         else if (event.type === 'turn.failed' || event.type === 'error') {
           const raw = JSON.stringify(event);
-          fail(/quota|usage.limit|rate.limit|429/i.test(raw) ? 'Codex 额度或调用频率受限，请稍后重试。' : /unauthorized|authentication|401|not.logged/i.test(raw) ? 'Codex 登录已失效，请重新登录后重试。' : 'Codex 调用失败，请检查本机连接后重试。');
+          fail(/quota|usage.limit|rate.limit|429/i.test(raw) ? 'Codex 额度或调用频率受限，请稍后重试。' : /unauthorized|authentication|401|not.logged/i.test(raw) ? 'Codex 登录已失效，请重新登录后重试。' : /model.not.found|model_not_found|not supported when using codex/i.test(raw) ? '当前账户不能调用所选 Codex 模型，请在本地设置中更换模型。' : 'Codex 调用失败，请检查本机连接后重试。');
         } else if (typeof event.type === 'string' && event.type.startsWith('item.')) {
           const item = event.item as Record<string, unknown>;
           if (!item || typeof item.type !== 'string') throw new Error('CLI 内容事件无效。');
@@ -99,6 +107,9 @@ export class CodexCliProvider implements AgentModelProvider {
             if (item.text.startsWith(previous)) stream.push({ type: 'content_delta', text: item.text.slice(previous.length) } satisfies AgentEvent);
             messages.set(item.id, item.text);
             if (event.type === 'item.completed') answer = item.text;
+          } else if (item.type === 'error') {
+            const message = typeof item.message === 'string' ? item.message : '';
+            fail(/recorded with model/i.test(message) ? '当前对话使用过其他 Codex 模型，请新建对话或切回原模型后重试。' : 'Codex 调用失败，请检查本机连接后重试。');
           } else if (!['reasoning', 'plan', 'todo_list'].includes(item.type)) fail('Agent 尝试调用本阶段未开放的工具，任务已停止。');
         }
       };

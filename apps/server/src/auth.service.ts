@@ -35,6 +35,9 @@ export class AuthService {
       CREATE INDEX IF NOT EXISTS login_sessions_user ON login_sessions(user_id);
       CREATE TABLE IF NOT EXISTS login_attempts (
         key TEXT PRIMARY KEY NOT NULL, failures INTEGER NOT NULL, resets_at INTEGER NOT NULL
+      ) STRICT;
+      CREATE TABLE IF NOT EXISTS app_settings (
+        key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL
       ) STRICT;`);
   }
 
@@ -51,6 +54,18 @@ export class AuthService {
     const row = this.database.prepare('SELECT legacy_data FROM users WHERE id = ?').get(user.id);
     if (!row) throw new UnauthorizedException('登录已失效，请重新登录。');
     return row.legacy_data === 1 ? this.directory : resolve(this.directory, 'users', user.id);
+  }
+
+  codexModel(): string | null {
+    const row = this.database.prepare('SELECT value FROM app_settings WHERE key = ?').get('codex_model');
+    return row ? String(row.value) : null;
+  }
+
+  setCodexModel(model: string | null): void {
+    if (model === null) { this.database.prepare('DELETE FROM app_settings WHERE key = ?').run('codex_model'); return; }
+    if (!/^[a-zA-Z0-9._-]{1,80}$/.test(model)) throw new BadRequestException('Codex 模型编号无效。');
+    this.database.prepare(`INSERT INTO app_settings VALUES (?, ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value`).run('codex_model', model);
   }
 
   login(input: unknown, address: string): Promise<{ user: AuthUser; token: string }> {

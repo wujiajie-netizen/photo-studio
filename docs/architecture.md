@@ -6,7 +6,7 @@
 
 `scripts/online.mjs` 使用系统 SSH 与 localhost.run 建立免费 HTTPS 隧道，不读取用户 SSH 私钥。启动器解析实际分配域名后设置 `PHOTO_STUDIO_PUBLIC_ORIGIN`，通过子进程运行生产服务；异常退出自动重启，隧道断线自动重连，域名变化时关闭旧服务后切换来源。启停、状态与日志位于 `data/deployment`；同时运行开发服务会被拒绝，避免同一数据目录有多个模型执行器。浏览器在公网 HTTP 页面加载时先转 HTTPS，正式 HTTPS 响应提供 HSTS 与 Secure Cookie。免费入口会限速与换域名，当前只用于小范围试用。
 
-`accounts.db` 保存 users、login_sessions 与 login_attempts。账号密码使用独立随机盐和 scrypt 派生；七天会话只保存随机 token 的 SHA256，浏览器通过 HttpOnly、SameSite=Lax、Path=/api Cookie 持有原 token。`PHOTO_STUDIO_PUBLIC_ORIGIN` 配置正式 HTTPS 入口时启用 Secure Cookie；写操作要求应用请求头并校验 Origin。账号或来源连续登录失败触发十五分钟限制。退出立即撤销 token 并关闭对应 SSE；重置或停用撤销所有会话，已有 SSE 最迟三十秒内关闭。
+`accounts.db` 保存 users、login_sessions、login_attempts 与全局 app_settings。账号密码使用独立随机盐和 scrypt 派生；七天会话只保存随机 token 的 SHA256，浏览器通过 HttpOnly、SameSite=Lax、Path=/api Cookie 持有原 token。`PHOTO_STUDIO_PUBLIC_ORIGIN` 配置正式 HTTPS 入口时启用 Secure Cookie；写操作要求应用请求头并校验 Origin。账号或来源连续登录失败触发十五分钟限制。退出立即撤销 token 并关闭对应 SSE；重置或停用撤销所有会话，已有 SSE 最迟三十秒内关闭。
 
 为沿用现有业务结构，每个账号按需初始化并缓存独立的 `AppModule.forWorkspace`，拥有自己的 SQLite、业务队列、事件流、文件目录和 Codex 提供者。首次本机命令创建的管理员使用原数据根目录，保留全部旧项目、素材和对话；后续账号使用 `users/<userId>/`，不复制旧数据。请求不会把客户端账号编号作为目录来源；跨账号引用项目、素材、作品、画布或任务时，在当前账号数据库中找不到目标，按现有规则返回不存在。服务退出先关闭 SSE 和账号任务，再关闭数据库。
 
@@ -105,7 +105,7 @@ interface AgentModelProvider {
 - 图片以当前任务目录中的本地文件传入。
 - 多轮任务保存会话标识，并通过 CLI 恢复能力继续。
 - 原始事件只在 `CodexCliProvider` 内解析并归一化。
-- 规划与文案显式指定本机验证可用的 `gpt-5.5`，可通过 `PHOTO_STUDIO_CODEX_MODEL` 配置账户支持的模型，避免忽略用户配置后落入 CLI 不受当前账户支持的默认模型。
+- 管理员设置页通过 Codex app-server 的 `model/list` 展示当前模型目录，首次使用选择目录中 `isDefault` 标记的模型；管理员选择持久化到全局 app_settings，规划、文案和生图统一读取该选择，不在代码中固定模型名。模型目录只用于选择，不作为账户权限证明，实际调用失败时保留明确错误。
 - 商品图、商品套图和详情模块的真实生图使用 Codex 内置图片生成能力，经过统一 `AgentModelProvider` 调用；不使用 OpenAI API Key，不依赖本地扩散模型。
 - 规划和文案请求保持只读沙箱并关闭生图；图片请求仅开放内置生图工具，在独立任务目录中接收本次商品素材，通过应用协议接收 PNG 字节。应用校验图片后保存到本地结果目录并写入结果库；不读取模型回复或事件中的任意文件路径。Codex 自身可能另存图片副本到其生成目录。
 - 每个任务创建独立目录，记录输入、Schema、事件、结果和必要日志。
@@ -145,6 +145,8 @@ LangGraph 保存业务状态并控制节点转换；Codex CLI 负责需求理解
 `GET /api/agent/tasks/:id/parameters` 只读取本轮最近保存的 `{ steps }` 草案，恢复素材选择；尚未整理的方案返回 404。`POST` 可按素材复用缓存，并更新最近草案，不因刷新重新推断素材。执行记录优先从持久化步骤恢复。
 
 纯文字图片调用不写 `source.png`，不传 `localImage`，直接使用原生生图返回的 PNG 字节；检查只接收生成图，不假定第一张是原图。素材模式保留原有路径。旧 SQLite 的必填素材列经完整快照与事务迁移为可空列，保留任务及结果外键引用。
+
+单张图的文案与设计方向沿用 `ProductImageParameters.description`，不新增请求字段；明确场景优先于 `scene` 默认值，生成和检查采用相同规则。Agent 对已成功出图但未通过检查的单图，将原 `observation` 作为内部 `feedback` 传给 `ProductImageService.submit` 和图片引擎，不覆盖或截断已确认参数。反馈仅附在本次内存队列项中，并保存到任务目录的 `review-feedback.txt`；最终生图输入仍由提供者记录。服务重启按既有规则将未完成任务标为失败，不恢复自动重试。执行异常不转为画面反馈；仍最多自动重试一次。独立任务的手动重试沿用原参数。
 
 ## 图片工具
 

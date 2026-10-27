@@ -17,6 +17,7 @@ export class CodexCallQueue {
 export class QueuedModelProvider implements AgentModelProvider {
   private readonly cancelled = new Set<string>();
   private readonly active = new Set<string>();
+  private readonly cancellations = new Map<string, { finish: () => void; release: () => void }>();
   constructor(private readonly provider: AgentModelProvider, private readonly queue: CodexCallQueue) {}
 
   run(input: AgentInput): AsyncIterable<AgentEvent> { return this.stream(input.taskId, () => this.provider.run(input)); }
@@ -24,7 +25,11 @@ export class QueuedModelProvider implements AgentModelProvider {
   private stream(id: string, start: () => AsyncIterable<AgentEvent>): AsyncIterable<AgentEvent> {
     const events: AgentEvent[] = []; let done = false;
     let wake: (() => void) | undefined;
-    const push = (event: AgentEvent) => { events.push(event); wake?.(); wake = undefined; };
+    let releaseCancellation: () => void = () => {};
+    const cancellation = new Promise<void>(resolve => { releaseCancellation = resolve; });
+    const push = (event: AgentEvent) => { if (done) return; events.push(event); wake?.(); wake = undefined; };
+    const finish = () => { if (done) return; done = true; wake?.(); wake = undefined; };
+    this.cancellations.set(id, { finish: () => { push({ type: 'cancelled' }); finish(); }, release: releaseCancellation });
     this.active.add(id);
     this.queue.enqueue(() => {
       if (this.cancelled.has(id)) { push({ type: 'cancelled' }); return Promise.resolve(); }
@@ -33,9 +38,10 @@ export class QueuedModelProvider implements AgentModelProvider {
         if (value.done) return;
         push(value.value); return read();
       });
-      return read();
+      /* 取消后的 Codex 进程若迟迟不退出，最多等待底层取消超时，不能永久占住全局串行队列。 */
+      return Promise.race([read(), cancellation.then(() => { iterator.return?.().catch(() => {}); })]);
     }).catch((error: Error) => push({ type: 'failed', message: error.message }))
-      .finally(() => { this.cancelled.delete(id); this.active.delete(id); done = true; wake?.(); });
+      .finally(() => { this.cancelled.delete(id); this.active.delete(id); this.cancellations.delete(id); finish(); });
     const next = (): Promise<IteratorResult<AgentEvent>> => {
       if (events.length) return Promise.resolve({ value: events.shift()!, done: false });
       if (done) return Promise.resolve({ value: undefined, done: true });
@@ -56,7 +62,10 @@ export class QueuedModelProvider implements AgentModelProvider {
     });
   }
   cancel(id: string): Promise<void> {
-    if (this.active.has(id)) this.cancelled.add(id);
-    return this.provider.cancel(id);
+    const cancellation = this.cancellations.get(id);
+    if (this.active.has(id)) { this.cancelled.add(id); cancellation?.finish(); }
+    let timer: NodeJS.Timeout;
+    const timeout = new Promise<void>(resolve => { timer = setTimeout(resolve, 5000); timer.unref(); });
+    return Promise.race([this.provider.cancel(id), timeout]).finally(() => { clearTimeout(timer); cancellation?.release(); });
   }
 }

@@ -4,7 +4,7 @@ import { existsSync } from 'node:fs';
 import { copyFile, mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { Subject } from 'rxjs';
-import { prepareProductImage, type renderMockProductImage } from '@photo-studio/tools';
+import { prepareProductImage, type CommerceImageRenderer } from '@photo-studio/tools';
 import { validateProductImageParameters, type AgentExecutionStep, type EditorLayer, type ImageToolInput, type ProductAsset, type ProductImageParameters, type ProductImageResult, type ProductImageTask } from '@photo-studio/shared';
 import { StorageService } from './storage.service';
 import { ProjectsService } from './projects.service';
@@ -18,12 +18,12 @@ const resultColumns = 'id, task_id AS taskId, name, width, height, created_at AS
 @Injectable()
 export class ProductImageService implements OnApplicationShutdown {
   readonly changes = new Subject<ProductImageTask>();
-  private readonly queue: ProductImageTask[] = [];
+  private readonly queue: (ProductImageTask & { feedback: string })[] = [];
   private running: { id: string; signal: AbortController } | null = null;
   private work: Promise<void> = Promise.resolve();
   private stopped = false;
 
-  constructor(@Inject(StorageService) private readonly storage: StorageService, @Inject(ProjectsService) private readonly projects: ProjectsService, @Inject(PRODUCT_IMAGE_TOOL) private readonly render: typeof renderMockProductImage) {
+  constructor(@Inject(StorageService) private readonly storage: StorageService, @Inject(ProjectsService) private readonly projects: ProjectsService, @Inject(PRODUCT_IMAGE_TOOL) private readonly render: CommerceImageRenderer) {
     this.storage.beforeClose.push(() => this.onApplicationShutdown());
     this.storage.database.prepare("UPDATE product_image_tasks SET status = 'failed', error = ?, updated_at = ? WHERE status IN ('queued', 'running')").run('服务已重新启动，图片任务已中断，请重试。', new Date().toISOString());
   }
@@ -100,7 +100,7 @@ export class ProductImageService implements OnApplicationShutdown {
     return this.storage.database.prepare(`SELECT ${resultColumns} FROM product_image_results WHERE project_id = ? UNION ALL SELECT ${resultColumns} FROM commerce_results WHERE project_id = ? UNION ALL SELECT ${resultColumns} FROM image_tool_results WHERE project_id = ? ORDER BY createdAt DESC, id DESC`).all(id, id, id) as unknown as ProductImageResult[];
   }
 
-  submit(input: unknown): ProductImageTask {
+  submit(input: unknown, feedback = ''): ProductImageTask {
     let parameters: ProductImageParameters;
     try { parameters = validateProductImageParameters(input); } catch (error) { throw new BadRequestException((error as Error).message); }
     if (parameters.sourceAssetId !== null) this.asset(parameters.sourceAssetId);
@@ -109,7 +109,7 @@ export class ProductImageService implements OnApplicationShutdown {
     const now = new Date().toISOString();
     const task: ProductImageTask = { id: randomUUID(), parameters, status: 'queued', progress: 0, createdAt: now, updatedAt: now, error: null };
     this.storage.database.prepare('INSERT INTO product_image_tasks VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(task.id, parameters.sourceAssetId, JSON.stringify(parameters), task.status, 0, now, now, null);
-    this.queue.push(task); this.changes.next(task);
+    this.queue.push({ ...task, feedback }); this.changes.next(task);
     queueMicrotask(() => this.pump());
     return task;
   }
@@ -164,11 +164,12 @@ export class ProductImageService implements OnApplicationShutdown {
     this.work = Promise.resolve().then(() => { check(); return mkdir(directory, { recursive: true }); })
       .then(() => { check(); if (task.parameters.sourceAssetId !== null) return copyFile(this.assetFile(task.parameters.sourceAssetId), source); })
       .then(() => writeFile(resolve(directory, 'parameters.json'), JSON.stringify(task.parameters), 'utf8'))
+      .then(() => { if (task.feedback) return writeFile(resolve(directory, 'review-feedback.txt'), task.feedback, 'utf8'); })
       .then(() => task.parameters.sourceAssetId === null ? null : readFile(source))
       .then((input) => {
         let images: Promise<void> = Promise.resolve();
         for (let index = 0; index < task.parameters.count; index++) {
-          images = images.then(() => { check(); return this.render(input, task.parameters, index, signal.signal); })
+          images = images.then(() => { check(); return this.render(input, task.parameters, index, signal.signal, undefined, task.feedback); })
             .then(({ data, width, height }) => {
               check();
               const result: ProductImageResult = { id: randomUUID(), taskId: task.id, name: `商品图_${index + 1}.png`, width, height, createdAt: new Date().toISOString(), projectId: null };

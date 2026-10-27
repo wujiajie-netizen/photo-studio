@@ -79,7 +79,7 @@ Promise.resolve()
       throw new Error('工作台已在运行，请先使用 scripts/stop.ps1 停止。');
     }
   })
-  .then(() => Promise.all([checkPort(3000), checkPort(5173)]))
+  .then(() => Promise.all([checkPort(3000), checkPort(5173), checkPort(3199)]))
   .then(() => {
     writeFileSync(recordPath, JSON.stringify({ pid: process.pid, root, script: fileURLToPath(import.meta.url), startedAt: Date.now() - process.uptime() * 1000 }), 'utf8');
     const compiler = require.resolve('typescript/bin/tsc');

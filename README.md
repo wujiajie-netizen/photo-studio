@@ -63,7 +63,7 @@ Get-Content .\data\deployment\status.json
 
 规划、文案、整图生成及复杂改图通过本机已登录的 Codex CLI 执行，使用 `codex login` 登录 ChatGPT，无需 OpenAI API Key。Codex 调用需要联网并消耗账户额度。
 
-CLI 需支持 `--json`、`--output-schema`、`--ignore-user-config`、`--ignore-rules` 和 `app-server --stdio`。Windows 自动定位 PATH 下官方 npm 安装的原生程序；其他位置通过 `PHOTO_STUDIO_CODEX_PATH` 指定。规划和生图调度默认使用代码配置的 `gpt-5.5`，分别可通过 `PHOTO_STUDIO_CODEX_MODEL`、`PHOTO_STUDIO_CODEX_IMAGE_MODEL` 调整。
+CLI 需支持 `--json`、`--output-schema`、`--ignore-user-config`、`--ignore-rules` 和 `app-server --stdio`。Windows 自动定位 PATH 下官方 npm 安装的原生程序；其他位置通过 `PHOTO_STUDIO_CODEX_PATH` 指定。管理员可在本地设置中读取 Codex 当前模型目录并选择调用模型；首次使用默认跟随目录中的默认模型，规划、文案和生图统一使用所选模型。模型目录不代表账户调用权限，实际可用性以任务结果为准。
 
 当前分支的“编辑文字 → 直接编辑”和抠图使用本地专用模型，不调用 Codex；拆层仍需一次 Codex 前景语义分析，再用本地模型分割和补背景。AI 改图、无痕消除、无痕改字、AI 超清和 AI 扩图仍调用 Codex 生图，功能与输出区别见 [创作工具处理方式](docs/creation-tools-contract.md#功能与处理方式)。安装 uv 后执行：
 

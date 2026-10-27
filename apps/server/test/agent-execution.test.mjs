@@ -82,14 +82,15 @@ test('Agent executes confirmed tools, observes real images, limits retries, save
 test('same-page text creation persists model parameters, creates one project, and uses only generated images for checks', () => {
   const directory = mkdtempSync(join(tmpdir(), 'photo-studio-text-')); const original = process.env.PHOTO_STUDIO_DATA_DIR; process.env.PHOTO_STUDIO_DATA_DIR = directory;
   let app, base, planTaskId, saved, picture, parametersCalls = 0; let holdParameters = false; const parameterStreams = new Map();
-  const parameters = { sourceAssetId: null, subject: 'keep', scene: 'warm', description: '咖啡豆暖色宣传图，不添加商品事实', ratio: '3:4', count: 1, quality: 'standard' };
+  const prompts = []; const feedback = '缺少指定标题“咖啡时光”，请完整绘制并保持文字清晰。';
+  const parameters = { sourceAssetId: null, subject: 'keep', scene: 'warm', description: '咖啡豆暖色宣传图，标题“咖啡时光”，不添加商品事实。' + '保留咖啡豆。'.repeat(160), ratio: '3:4', count: 1, quality: 'standard' };
   const provider = {
     run(input) {
       if (input.schema.required.includes('steps')) { ++parametersCalls; assert.match(input.prompt, /咖啡豆/); if (holdParameters) { const stream = new Readable({ objectMode: true, read() {} }); parameterStreams.set(input.taskId, stream); return stream; } return Readable.from([{ type: 'completed', result: { steps: [{ title: '咖啡宣传图', tool: 'product-image', parameters }] } }]); }
-      if (input.schema.required.includes('approved')) { assert.equal(input.images.length, 1); assert.match(input.prompt, /没有原始商品图/); return Readable.from([{ type: 'completed', result: { approved: true, observation: '画面完整，符合咖啡示意需求。' } }]); }
+      if (input.schema.required.includes('approved')) { assert.equal(input.images.length, 1); assert.match(input.prompt, /没有原始商品图/); assert.match(input.prompt, /description 明确的场景与背景优先于 scene 默认值/); return Readable.from([{ type: 'completed', result: { approved: prompts.length > 1, observation: prompts.length > 1 ? '画面完整，符合咖啡示意需求。' : feedback } }]); }
       return Readable.from([{ type: 'completed', result: { summary: '生成一张暖色咖啡示意图', questions: [], plan: [{ title: '咖啡宣传图', tool: 'product-image', description: '暖色光线与咖啡豆' }] } }]);
     },
-    generateImage(_id, source, prompt) { assert.equal(source, null); assert.match(prompt, /No source photo/); return Promise.resolve(picture); },
+    generateImage(_id, source, prompt) { assert.equal(source, null); assert.match(prompt, /No source photo/); prompts.push(prompt); return Promise.resolve(picture); },
     cancel(id) { const stream = parameterStreams.get(id); if (stream) { stream.push({ type: 'cancelled' }); stream.push(null); parameterStreams.delete(id); } return Promise.resolve(); }
   };
   class TestModule {}
@@ -105,10 +106,17 @@ test('same-page text creation persists model parameters, creates one project, an
     .then(result => { assert.deepEqual(result.body, saved); return send('/agent/executions', { planTaskId, projectId: null, steps: [{ ...saved.steps[0], tool: 'shell' }] }); })
     .then(result => { assert.equal(result.status, 400); return send('/projects'); }).then(result => { assert.equal(result.body.length, 0); return send('/agent/executions', { planTaskId, projectId: null, steps: saved.steps }); })
     .then(result => { assert.equal(result.status, 201, JSON.stringify(result.body)); saved.execution = result.body; return wait('/agent/executions/' + result.body.id); })
-    .then(execution => { assert.equal(execution.projectId, saved.execution.projectId); return send('/projects/' + execution.projectId + '/results'); })
+    .then(execution => {
+      assert.equal(execution.projectId, saved.execution.projectId); assert.equal(execution.steps[0].retryCount, 1);
+      assert.deepEqual(execution.steps[0].parameters, parameters); assert.equal(prompts.length, 2);
+      assert.notEqual(prompts[0], prompts[1]); assert.ok(prompts.every(prompt => prompt.includes(parameters.description)));
+      assert.ok(!prompts[0].includes(feedback)); assert.ok(prompts[1].includes(feedback));
+      assert.equal(readFileSync(join(directory, 'runs', `product-image-${execution.steps[0].taskId}`, 'review-feedback.txt'), 'utf8'), feedback);
+      return send('/projects/' + execution.projectId + '/results');
+    })
     .then(result => { assert.equal(result.body.length, 1); assert.equal(result.body[0].width, 768); assert.equal(result.body[0].height, 1024); return send('/agent/executions', { planTaskId, projectId: null, steps: saved.steps }); })
     .then(result => { assert.equal(result.body.projectId, saved.execution.projectId); return wait('/agent/executions/' + result.body.id); })
-    .then(() => send('/projects')).then(result => { assert.equal(result.body.length, 1); return send('/agent/sessions', { content: '再做一张咖啡豆主图' }); })
+    .then(() => { assert.equal(prompts.length, 3); assert.ok(!prompts[2].includes(feedback)); return send('/projects'); }).then(result => { assert.equal(result.body.length, 1); return send('/agent/sessions', { content: '再做一张咖啡豆主图' }); })
     .then(result => wait('/agent/tasks/' + result.body.id)).then(task => {
       holdParameters = true; const controller = new AbortController(); const service = app.get(AgentExecutionService);
       const pending = assert.rejects(service.parameters(task.id, { sourceAssetId: null }, controller.signal), /停止/);

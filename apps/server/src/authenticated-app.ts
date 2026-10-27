@@ -8,6 +8,7 @@ import { AuthController, sessionToken } from './auth.controller';
 import { AuthService } from './auth.service';
 import { AppModule } from './app.module';
 import { CodexCallQueue } from './codex-call-queue';
+import { CodexModelService } from './codex-model.service';
 
 @Module({ controllers: [AuthController] })
 class GatewayModule {}
@@ -17,6 +18,7 @@ export function createAuthenticatedApp(options: { directory?: string; logger?: f
   const workspaces = new Map<string, Promise<INestApplication>>();
   const streams = new Map<Response, string>();
   const queue = new CodexCallQueue();
+  const models = new CodexModelService(() => auth.codexModel(), model => auth.setCodexModel(model));
   let closing = false;
   const sweep = setInterval(() => {
     for (const [response, token] of streams) if (!auth.user(token)) response.end();
@@ -63,9 +65,10 @@ export function createAuthenticatedApp(options: { directory?: string; logger?: f
         }
         const token = sessionToken(request); const user = auth.user(token);
         if (!user) { response.status(401).json({ message: '请登录后继续使用。' }); return; }
-        if (user.role !== 'admin' && ['/api/codex/status', '/api/image-tools/status'].includes(path.toLowerCase().replace(/\/+$/, ''))) { response.status(403).json({ message: '此操作仅供管理员使用。' }); return; }
+        const normalizedPath = path.toLowerCase().replace(/\/+$/, '');
+        if (user.role !== 'admin' && (normalizedPath.startsWith('/api/codex/') || normalizedPath === '/api/image-tools/status')) { response.status(403).json({ message: '此操作仅供管理员使用。' }); return; }
         if (!workspaces.has(user.id)) {
-          const pending = NestFactory.create(AppModule.forWorkspace(auth.workspace(user), queue), { logger: options.logger, abortOnError: false })
+          const pending = NestFactory.create(AppModule.forWorkspace(auth.workspace(user), queue, models), { logger: options.logger, abortOnError: false })
             .then(workspace => { workspace.setGlobalPrefix('api'); return workspace.init().then(() => workspace).catch(error => workspace.close().then(() => { throw error; })); });
           workspaces.set(user.id, pending);
           pending.catch(() => workspaces.delete(user.id));

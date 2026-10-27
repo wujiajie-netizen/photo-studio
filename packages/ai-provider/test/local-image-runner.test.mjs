@@ -42,7 +42,7 @@ test('local image transport isolates files, validates outputs and stops cancelle
     }));
     return child;
   });
-  const provider = new CodexCliProvider(join(directory, 'runs'));
+  const provider = new CodexCliProvider(join(directory, 'runs'), () => Promise.resolve('unused-local-test'));
   const run = (signal = new AbortController().signal, progress = () => {}) => provider.processImage(randomUUID(), source, { operation: 'cutout' }, signal, progress);
   return run().then(output => {
     assert.deepEqual(output.images[0].data, source); assert.deepEqual(output.text, []);

@@ -10,6 +10,19 @@ export interface CodexStatus {
   message: string;
 }
 
+export interface CodexModelOption {
+  id: string;
+  displayName: string;
+  description: string;
+  isDefault: boolean;
+}
+
+export interface CodexModelSettings {
+  models: CodexModelOption[];
+  selectedModel: string;
+  defaultModel: string;
+}
+
 export interface Project {
   id: string;
   name: string;

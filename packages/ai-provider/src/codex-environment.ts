@@ -1,8 +1,8 @@
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { delimiter, dirname, join, resolve } from 'node:path';
-import type { CodexStatus } from '@photo-studio/shared';
+import type { CodexModelOption, CodexStatus } from '@photo-studio/shared';
 
 export function findCodexExecutable(): string | null {
   if (process.env.PHOTO_STUDIO_CODEX_PATH) return resolve(process.env.PHOTO_STUDIO_CODEX_PATH);
@@ -63,4 +63,54 @@ export function inspectCodex(): Promise<CodexStatus> {
       version,
       message: error.code === 'ENOENT' ? '未找到 Codex CLI，请检查安装位置后刷新状态。' : '无法完成 Codex 检测，请检查本机 CLI 后重试。'
     }));
+}
+
+export function listCodexModels(): Promise<CodexModelOption[]> {
+  /* 仅通过 app-server 协议读取可见目录；不发起推理，也不把配置和凭据返回业务层。 */
+  return inspectCodex().then(status => {
+    if (status.status !== 'ready') throw new Error(status.message);
+    const executable = findCodexExecutable();
+    if (!executable) throw new Error('未找到 Codex CLI。');
+    const args = ['app-server', '--stdio', '-c', 'features.plugins=false', '-c', 'features.apps=false', '-c', 'features.remote_control=false'];
+    const env = { ...process.env }; delete env.OPENAI_API_KEY; delete env.CODEX_API_KEY;
+    const child = spawn(executable, args, { env, shell: false, windowsHide: true });
+    return new Promise<CodexModelOption[]>((resolveModels, reject) => {
+      let settled = false; let buffer = ''; let bytes = 0;
+      const finish = (error?: Error, models?: CodexModelOption[]) => {
+        if (settled) return; settled = true; clearTimeout(timeout); child.kill();
+        if (error) reject(error); else resolveModels(models!);
+      };
+      const send = (value: unknown) => child.stdin.write(`${JSON.stringify(value)}\n`);
+      const timeout = setTimeout(() => finish(new Error('读取 Codex 模型列表超时，请稍后重试。')), 10_000);
+      child.stdout.setEncoding('utf8');
+      child.stdout.on('data', (chunk: string) => {
+        if (settled) return;
+        bytes += Buffer.byteLength(chunk); buffer += chunk;
+        if (bytes > 2 * 1024 * 1024) { finish(new Error('Codex 模型列表超过限制。')); return; }
+        try {
+          for (let at; (at = buffer.indexOf('\n')) !== -1;) {
+            const line = buffer.slice(0, at); buffer = buffer.slice(at + 1);
+            if (!line.trim()) continue;
+            const event = JSON.parse(line) as { id?: number; result?: { data?: unknown[] }; error?: unknown };
+            if (event.id === 1 && event.result) {
+              send({ method: 'initialized', params: {} });
+              send({ id: 2, method: 'model/list', params: { includeHidden: false, limit: 100 } });
+            } else if (event.id === 2) {
+              if (event.error || !Array.isArray(event.result?.data)) { finish(new Error('Codex 无法返回可用模型，请稍后重试。')); return; }
+              const models = event.result.data.map(value => {
+                const item = value as Record<string, unknown>;
+                return { id: item.model, displayName: item.displayName, description: item.description, isDefault: item.isDefault };
+              }).filter((item): item is CodexModelOption => typeof item.id === 'string' && /^[a-zA-Z0-9._-]{1,80}$/.test(item.id) && typeof item.displayName === 'string' && typeof item.description === 'string' && typeof item.isDefault === 'boolean');
+              if (!models.length) { finish(new Error('Codex 当前没有可选择的模型。')); return; }
+              finish(undefined, models);
+            }
+          }
+        } catch { finish(new Error('无法读取 Codex 模型列表，请检查 CLI 版本后重试。')); }
+      });
+      child.stdin.on('error', () => finish(new Error('无法向 Codex 请求模型列表。')));
+      child.once('error', () => finish(new Error('无法启动 Codex，请检查本机安装。')));
+      child.once('close', () => { if (!settled) finish(new Error('Codex 模型列表连接意外结束，请重试。')); });
+      send({ id: 1, method: 'initialize', params: { clientInfo: { name: 'photo_studio', title: 'Photo Studio', version: '0.1.0' }, capabilities: { experimentalApi: true } } });
+    });
+  });
 }

@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { PRODUCT_UPLOAD_LIMIT, validateProductImageParameters, validateCommerceParameters, type CommerceParameters, type ProductImageParameters, type EditorLayer } from '@photo-studio/shared';
 
 export interface CommerceRenderContext { parameters: CommerceParameters; sectionIndex: number }
-export type CommerceImageRenderer = (input: Buffer | null, parameters: ProductImageParameters, index: number, signal: AbortSignal, context?: CommerceRenderContext) => Promise<{ data: Buffer; width: number; height: number }>;
+export type CommerceImageRenderer = (input: Buffer | null, parameters: ProductImageParameters, index: number, signal: AbortSignal, context?: CommerceRenderContext, feedback?: string) => Promise<{ data: Buffer; width: number; height: number }>;
 
 export function prepareProductImage(input: Buffer): Promise<{ data: Buffer; width: number; height: number }> {
   if (!input.length || input.length > PRODUCT_UPLOAD_LIMIT) return Promise.reject(new Error('图片大小必须在 20 MB 以内。'));

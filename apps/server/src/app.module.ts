@@ -23,22 +23,24 @@ import { ImageToolController } from './image-tool.controller';
 import { PresetsController } from './presets.controller';
 import { PresetsService } from './presets.service';
 import { CodexCallQueue, QueuedModelProvider } from './codex-call-queue';
+import { CodexModelService } from './codex-model.service';
 
 @Module({
   controllers: [AppController, ProjectsController, CodexController, AgentController, ProductImageController, CommerceController, EditorController, ImageEngineController, AgentExecutionController, ImageToolController, PresetsController],
-  providers: [StorageService, ProjectsService, AgentService, ProductImageService, CommerceService, EditorService, ImageEngineService, AgentExecutionService, ImageToolService, PresetsService, { provide: PRODUCT_IMAGE_TOOL, inject: [ImageEngineService], useFactory: (engine: ImageEngineService) => engine.render.bind(engine) }, {
+  providers: [StorageService, ProjectsService, AgentService, ProductImageService, CommerceService, EditorService, ImageEngineService, AgentExecutionService, ImageToolService, PresetsService, { provide: CodexModelService, useFactory: () => new CodexModelService() }, { provide: PRODUCT_IMAGE_TOOL, inject: [ImageEngineService], useFactory: (engine: ImageEngineService) => engine.render.bind(engine) }, {
     provide: AGENT_MODEL_PROVIDER,
-    inject: [StorageService],
-    useFactory: (storage: StorageService) => new CodexCliProvider(resolve(storage.dataDirectory, 'runs'))
+    inject: [StorageService, CodexModelService],
+    useFactory: (storage: StorageService, models: CodexModelService) => new CodexCliProvider(resolve(storage.dataDirectory, 'runs'), () => models.selected())
   }]
 })
 export class AppModule {
-  static forWorkspace(directory: string, queue: CodexCallQueue): DynamicModule {
+  static forWorkspace(directory: string, queue: CodexCallQueue, models: CodexModelService): DynamicModule {
     return {
       module: AppModule,
       providers: [
         { provide: 'PHOTO_STUDIO_DATA_DIRECTORY', useValue: directory },
-        { provide: AGENT_MODEL_PROVIDER, inject: [StorageService], useFactory: (storage: StorageService) => new QueuedModelProvider(new CodexCliProvider(resolve(storage.dataDirectory, 'runs')), queue) }
+        { provide: CodexModelService, useValue: models },
+        { provide: AGENT_MODEL_PROVIDER, inject: [StorageService], useFactory: (storage: StorageService) => new QueuedModelProvider(new CodexCliProvider(resolve(storage.dataDirectory, 'runs'), () => models.selected()), queue) }
       ]
     };
   }

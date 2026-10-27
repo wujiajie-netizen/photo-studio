@@ -39,6 +39,7 @@ test('Codex image transport accepts actual PNG events and rejects text-only succ
         if (request.method === 'thread/start') {
           assert.equal(request.params.config['mcp_servers.test_tool.enabled'], false);
           assert.equal(request.params.sandbox, 'read-only'); assert.equal(request.params.ephemeral, true);
+          assert.equal(request.params.model, 'gpt-image-test');
           assert.equal(request.params.cwd, options.cwd); threadId = randomUUID(); result = { thread: { id: threadId } };
         }
         if (request.method === 'turn/start') {
@@ -58,7 +59,7 @@ test('Codex image transport accepts actual PNG events and rejects text-only succ
     });
     return child;
   });
-  const provider = new CodexCliProvider(directory);
+  const provider = new CodexCliProvider(directory, () => Promise.resolve('gpt-image-test'));
   const generate = () => provider.generateImage(randomUUID(), source, '测试商品图', new AbortController().signal);
   return generate().then((data) => {
     assert.deepEqual(data, generated);

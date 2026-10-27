@@ -103,10 +103,12 @@ test('authenticated gateway isolates legacy data, accounts, assets, exports and 
         send(`/projects/${projectId}`, 'PATCH', { name: '越权修改' }, memberCookie),
         send(`/projects/${projectId}`, 'DELETE', undefined, memberCookie),
         send(`/agent/sessions/${sessionId}/events`, 'GET', undefined, memberCookie),
-        send('/codex/status', 'GET', undefined, memberCookie)
+        send('/codex/status', 'GET', undefined, memberCookie),
+        send('/codex/models', 'GET', undefined, memberCookie),
+        send('/codex/model', 'PATCH', { model: 'gpt-test' }, memberCookie)
       ]);
     }).then(responses => {
-      assert.deepEqual(responses.map(response => response.status), [404, 404, 404, 404, 403]);
+      assert.deepEqual(responses.map(response => response.status), [404, 404, 404, 404, 403, 403, 403]);
       return send('/projects', 'POST', { name: '成员独立项目' }, memberCookie);
     }).then(response => {
       assert.equal(response.status, 201);
@@ -132,10 +134,11 @@ test('authenticated gateway isolates legacy data, accounts, assets, exports and 
         send(`/editor/results/${resultId}/file`, 'GET', undefined, memberCookie),
         send('/editor/documents', 'POST', { resultId }, memberCookie),
         send(`/product-image/tasks/${taskId}/events`, 'GET', undefined, memberCookie),
-        send('/CoDeX/status/', 'GET', undefined, memberCookie)
+        send('/CoDeX/status/', 'GET', undefined, memberCookie),
+        send('/CoDeX/models/', 'GET', undefined, memberCookie)
       ]);
     }).then(responses => {
-      assert.deepEqual(responses.map(response => response.status), [404, 404, 404, 404, 403]);
+      assert.deepEqual(responses.map(response => response.status), [404, 404, 404, 404, 403, 403]);
       return fetch(`${base}/product-image/results/${resultId}/file`, { headers: { Cookie: adminCookie } });
     }).then(response => {
       assert.equal(response.status, 200); return response.arrayBuffer();

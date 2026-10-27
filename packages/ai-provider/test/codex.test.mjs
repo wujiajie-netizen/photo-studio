@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { basename, join, resolve, sep } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { test } from 'node:test';
-import { CodexCliProvider, inspectCodex } from '../dist/index.js';
+import { CodexCliProvider, inspectCodex, listCodexModels } from '../dist/index.js';
 
 test('CLI inspection reports installation, authentication and capability errors without model calls', (context) => {
   const originalPath = process.env.PHOTO_STUDIO_CODEX_PATH;
@@ -35,6 +35,38 @@ test('CLI inspection reports installation, authentication and capability errors 
       assert.equal(result.status, 'error');
       assert.ok(calls.every((args) => args[0] === '--version' || args.join(' ') === 'login status' || args.join(' ') === 'exec --help'));
     }).finally(() => { if (originalPath === undefined) delete process.env.PHOTO_STUDIO_CODEX_PATH; else process.env.PHOTO_STUDIO_CODEX_PATH = originalPath; });
+});
+
+test('model catalog reads visible Codex models and preserves the CLI default marker', (context) => {
+  const originalPath = process.env.PHOTO_STUDIO_CODEX_PATH;
+  process.env.PHOTO_STUDIO_CODEX_PATH = process.execPath;
+  context.mock.method(childProcess, 'execFile', (_file, args, _options, callback) => queueMicrotask(() => callback(null, args[0] === '--version' ? 'codex-cli 0.139.0' : args[0] === 'login' ? 'Logged in using ChatGPT' : '--json --output-schema --ignore-user-config --ignore-rules', '')));
+  const requests = [];
+  context.mock.method(childProcess, 'spawn', (_file, args, options) => {
+    assert.deepEqual(args.slice(0, 2), ['app-server', '--stdio']);
+    assert.equal(options.shell, false); assert.equal(options.windowsHide, true);
+    const child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough(); child.stdin = new PassThrough();
+    let buffer = ''; let closed = false;
+    const emit = value => child.stdout.write(`${JSON.stringify(value)}\n`);
+    child.kill = () => { if (!closed) { closed = true; queueMicrotask(() => child.emit('close', 0)); } return true; };
+    child.stdin.on('data', chunk => {
+      buffer += chunk.toString();
+      for (let at; (at = buffer.indexOf('\n')) !== -1;) {
+        const request = JSON.parse(buffer.slice(0, at)); buffer = buffer.slice(at + 1); requests.push(request);
+        if (request.id === 1) queueMicrotask(() => emit({ id: 1, result: { userAgent: 'test' } }));
+        if (request.id === 2) queueMicrotask(() => emit({ id: 2, result: { data: [
+          { model: 'gpt-new', displayName: 'GPT New', description: '最新模型', isDefault: true },
+          { model: 'gpt-stable', displayName: 'GPT Stable', description: '稳定模型', isDefault: false }
+        ] } }));
+      }
+    });
+    return child;
+  });
+  return listCodexModels().then(models => {
+    assert.deepEqual(models.map(model => model.id), ['gpt-new', 'gpt-stable']);
+    assert.equal(models.find(model => model.isDefault).id, 'gpt-new');
+    assert.equal(requests.find(request => request.id === 2).params.includeHidden, false);
+  }).finally(() => { if (originalPath === undefined) delete process.env.PHOTO_STUDIO_CODEX_PATH; else process.env.PHOTO_STUDIO_CODEX_PATH = originalPath; });
 });
 
 test('provider isolates files, decodes split UTF-8 JSONL, resumes and cancels without exposing raw events', (context) => {
@@ -67,13 +99,14 @@ test('provider isolates files, decodes split UTF-8 JSONL, resumes and cancels wi
       if (mode === 'success') events.push({ type: 'item.completed', item: { id: 'item_0', type: 'agent_message', text: JSON.stringify(result) } }, { type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1 } });
       if (mode === 'tool') events.push({ type: 'item.started', item: { id: 'item_0', type: 'command_execution', command: 'forbidden' } });
       if (mode === 'quota') events.push({ type: 'turn.failed', error: { message: 'usage limit reached' } });
+      if (mode === 'mismatch') events.push({ type: 'item.completed', item: { id: 'item_0', type: 'error', message: 'This session was recorded with model `old` but is resuming with `new`.' } });
       const bytes = Buffer.from(events.map((event) => JSON.stringify(event)).join('\n') + '\n');
       for (let index = 0; index < bytes.length; index += 7) child.stdout.write(bytes.subarray(index, index + 7));
       if (mode !== 'hold') close(mode === 'success' ? 0 : 1);
     }));
     return child;
   });
-  const provider = new CodexCliProvider(directory);
+  const provider = new CodexCliProvider(directory, () => Promise.resolve('gpt-latest-test'));
   function collect(stream, callback = () => {}) {
     const iterator = stream[Symbol.asyncIterator](); const events = [];
     const consume = () => iterator.next().then(({ value, done }) => { if (done) return events; events.push(value); callback(value); return consume(); });
@@ -86,14 +119,16 @@ test('provider isolates files, decodes split UTF-8 JSONL, resumes and cancels wi
     assert.ok(events.every((event) => !('thread_id' in event) && !('usage' in event)));
     assert.equal(readFileSync(join(directory, input.taskId, 'input.txt'), 'utf8'), '验收需求');
     assert.equal(invocations[0].options.cwd, join(directory, input.taskId));
+    assert.equal(invocations[0].args[invocations[0].args.indexOf('--model') + 1], 'gpt-latest-test');
     return collect(provider.continue(providerId, { ...input, taskId: randomUUID() }));
   }).then((events) => {
     assert.equal(events.at(-1).type, 'completed');
     assert.deepEqual(invocations[1].args.slice(0, 3), ['exec', 'resume', providerId]);
     mode = 'tool'; return collect(provider.run({ ...input, taskId: randomUUID() }));
   }).then((events) => { assert.match(events.at(-1).message, /未开放的工具/); mode = 'quota'; return collect(provider.run({ ...input, taskId: randomUUID() })); })
+    .then((events) => { assert.match(events.at(-1).message, /额度/); mode = 'mismatch'; return collect(provider.run({ ...input, taskId: randomUUID() })); })
     .then((events) => {
-      assert.match(events.at(-1).message, /额度/);
+      assert.match(events.at(-1).message, /其他 Codex 模型/);
       mode = 'hold'; const next = { ...input, taskId: randomUUID() };
       return collect(provider.run(next), (event) => { if (event.type === 'started') provider.cancel(next.taskId); });
     }).then((events) => {
@@ -101,7 +136,7 @@ test('provider isolates files, decodes split UTF-8 JSONL, resumes and cancels wi
       const next = { ...input, taskId: randomUUID() }; const stream = provider.run(next); provider.cancel(next.taskId);
       return collect(stream);
     }).then((events) => { assert.equal(events.at(-1).type, 'cancelled'); return collect(provider.run({ ...input, taskId: '../escape' })); })
-    .then((events) => { assert.equal(events.at(-1).type, 'failed'); assert.equal(invocations.length, 5); })
+    .then((events) => { assert.equal(events.at(-1).type, 'failed'); assert.equal(invocations.length, 6); })
     .finally(() => {
       if (originalPath === undefined) delete process.env.PHOTO_STUDIO_CODEX_PATH; else process.env.PHOTO_STUDIO_CODEX_PATH = originalPath;
       assert.ok(resolve(directory).startsWith(`${resolve(tmpdir())}${sep}`)); assert.ok(basename(directory).startsWith('photo-studio-provider-'));

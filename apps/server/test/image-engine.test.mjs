@@ -54,3 +54,22 @@ test('commerce generation receives platform, region, all facts, module role and 
     }
   }).finally(() => engine.onApplicationShutdown());
 });
+
+test('cabbage cover keeps requested copy and scene, while plain product photos do not request added copy', () => {
+  const prompts = []; let picture;
+  const engine = new ImageEngineService({ beforeClose: [] }, { generateImage(_id, _source, prompt) { prompts.push(prompt); return Promise.resolve(picture); } });
+  const parameters = { sourceAssetId: null, subject: 'keep', scene: 'cool', description: '大白菜，厨房或菜市场氛围。标题“大白菜到家”，副标题“家常菜少不了这一口”，辅助文字“涮、炒、炖都合适”。', ratio: '9:16', count: 1, quality: 'standard' };
+  return sharp({ create: { width: 36, height: 64, channels: 4, background: '#ffffff' } }).png().toBuffer().then(data => {
+    picture = data; return engine.render(null, parameters, 0, new AbortController().signal);
+  }).then(() => {
+    assert.ok(prompts[0].includes(parameters.description));
+    assert.doesNotMatch(prompts[0], /Do not add marketing text|will be added as editable text/);
+    assert.match(prompts[0], /Generate the requested copy and visual design together in one complete image/);
+    assert.match(prompts[0], /only when unspecified, use a cool blue/);
+    return engine.render(null, { ...parameters, scene: 'white', description: '白底大白菜商品图，不添加文字。' }, 0, new AbortController().signal);
+  }).then(() => {
+    assert.match(prompts[1], /If no added text is requested, keep the image free of added marketing text/);
+    assert.match(prompts[1], /白底大白菜商品图，不添加文字/);
+    assert.doesNotMatch(prompts[1], /previous attempt failed/);
+  }).finally(() => engine.onApplicationShutdown());
+});

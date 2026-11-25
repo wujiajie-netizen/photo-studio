@@ -42,6 +42,7 @@ export class ProductImageService implements OnApplicationShutdown {
     try {
       this.asset(id);
       const active = ['product_image_tasks', 'commerce_tasks'].some(table => database.prepare(`SELECT parameters FROM ${table} WHERE status IN ('queued', 'running')`).all().some(row => (JSON.parse(row.parameters as string) as ProductImageParameters).sourceAssetId === id))
+        || !!database.prepare("SELECT plan_task_id FROM agent_auto_flows WHERE source_asset_id = ? AND status IN ('planning', 'preparing', 'executing') LIMIT 1").get(id)
         || database.prepare(`SELECT steps FROM agent_executions WHERE status IN ('queued', 'running')`).all().some(row => (JSON.parse(row.steps as string) as AgentExecutionStep[]).some(step => step.parameters.sourceAssetId === id))
         || database.prepare(`SELECT input FROM image_tool_tasks WHERE status IN ('queued', 'running')`).all().some(row => {
           const input = JSON.parse(row.input as string) as ImageToolInput;

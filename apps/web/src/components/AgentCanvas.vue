@@ -17,6 +17,7 @@ import CanvasShapeDraw from './CanvasShapeDraw.vue';
 import CanvasLibrary from './CanvasLibrary.vue';
 import CanvasExport from './CanvasExport.vue';
 import CutoutRefinement from './CutoutRefinement.vue';
+import AgentCopy from './AgentCopy.vue';
 
 const props = defineProps<{ sessionId: string; taskIds: string[]; projectId: string | null; resultId: string | null }>();
 const emit = defineEmits<{ update: [state: { executions: AgentExecution[]; results: ProductImageResult[]; selectedId: string; loading: boolean }]; reference: [asset: ProductAsset, modifying: boolean]; reveal: [resultId: string] }>();
@@ -35,6 +36,11 @@ let initialResultPending = true;
 let boardDrag: { id: string; x: number; y: number; clientX: number; clientY: number } | null = null; let renderError = ''; let spaceHand: boolean | null = null;
 const referencing = ref(false);
 const editor = useEditorStore(); const agent = useAgentStore(); const editing = ref(false); const panel = ref(false); const overview = ref(false); const help = ref(false); const exporting = ref(false);
+/* 按所选作品的生成任务查找当前执行；同一执行的多张作品共用一份文案。 */
+const copyExecution = computed(() => {
+  if (!selected.value) return undefined;
+  return executions.value.find(execution => execution.status === 'succeeded' && execution.steps.some(step => step.taskId === selected.value?.taskId) && agent.flows.some(flow => flow.taskId === execution.planTaskId && flow.executionId === execution.id));
+});
 const imageId = ref('');
 const cropping = ref(false); const tools = ref(false); const picked = ref(false);
 const maskMode = ref<'edit' | 'erase' | 'replace-text' | null>(null); const toolSubmitting = ref(false); const toolTasks = ref<ImageToolTask[]>([]);
@@ -515,7 +521,7 @@ onUnmounted(() => { saveScene().catch(() => {}); ++version; if (sceneTimer) clea
       </div>
       <div v-if="editingText && editor.layer?.type === 'text'" class="text-entry" :style="textEntryPosition" @pointerdown.stop><textarea ref="textInput" v-model="editor.layer.text" aria-label="编辑文字内容" rows="2" maxlength="2000" :disabled="editor.layer.locked" @input="updateText" @keydown.esc.stop="editingText = false; area?.focus()" /><button type="button" title="完成编辑 Esc" @click="editingText = false; area?.focus()">完成</button></div>
       <div v-if="overview" class="canvas-overview" aria-label="全部作品"><header><strong>全部作品 · {{ results.length }} 张</strong><button type="button" aria-label="关闭作品总览" @click="overview = false"><X :size="14" /></button></header><div><button v-for="result in results" :key="result.id" type="button" :aria-label="`选择作品 ${result.name}`" @click="select(result.id)"><img :src="`/api/editor/results/${result.id}/file`" :alt="result.name" /><span>{{ result.name }}</span></button></div></div>
-      <div v-if="!selected" class="canvas-empty"><Image :size="38" :stroke-width="1" /><h3>{{ loading ? '正在读取作品…' : activeExecution ? '正在制作你的作品' : '从一个想法，开始创作' }}</h3><p v-if="activeExecution">生成与检查完成后，作品会出现在这里。<br />可以在左侧查看进度或停止当前任务。</p><p v-else>在左侧描述需求，确认方案后开始生成。<br />作品会进入画板，支持继续创作、编辑和下载。</p></div>
+      <div v-if="!selected" class="canvas-empty"><Image :size="38" :stroke-width="1" /><h3>{{ loading ? '正在读取作品…' : activeExecution ? '正在制作你的作品' : '从一个想法，开始创作' }}</h3><p v-if="activeExecution">生成与检查完成后，作品会出现在这里。<br />可以在左侧查看进度或停止当前任务。</p><p v-else>在左侧描述需求，助手会补充必要信息并开始创作。<br />作品会进入画板，支持继续创作、编辑和下载。</p></div>
     </div>
     <aside v-if="panel && selected" class="canvas-panel" aria-label="画板图层与属性">
       <header><h3>图层与属性</h3><button type="button" aria-label="关闭图层面板" @click="panel = false"><X :size="15" /></button></header><p v-if="editor.loading">正在读取…</p>
@@ -527,6 +533,9 @@ onUnmounted(() => { saveScene().catch(() => {}); ++version; if (sceneTimer) clea
     </aside>
     </div>
     <div v-if="activeExecution" class="canvas-progress"><span>{{ labels[activeExecution.status] }} · {{ activeExecution.progress }}% · 进度与停止操作在左侧对话</span></div>
+    <aside v-if="copyExecution && !specialMode" class="canvas-copy" :class="{ 'with-panel': panel }" :aria-label="`${selected?.name}的配套发布文案`" @pointerdown.stop @wheel.stop>
+      <AgentCopy :key="copyExecution.id" :execution-id="copyExecution.id" />
+    </aside>
 <section v-if="toolSettings === 'upscale'" class="tool-settings" aria-label="AI 超清"><strong>AI 超清</strong><label>清晰度<select v-model.number="upscale" :disabled="toolSubmitting"><option :value="2">2 倍</option><option :value="4">4 倍</option></select></label><p>增强细节，处理结果作为新作品保存。</p><div><button type="button" :disabled="toolSubmitting" @click="toolSettings = null; picked = true">取消</button><button type="button" :disabled="toolSubmitting" @click="submitTool({ operation: 'upscale', scale: upscale })">{{ toolSubmitting ? '正在提交…' : '开始超清' }}</button></div></section>
     <div v-if="toolTasks.length && !maskMode && !cropping && !toolSettings" class="tool-status" :class="{ expanded: toolHistory }" aria-label="图片处理记录"><header><span>图片处理</span><button type="button" :aria-expanded="toolHistory" @click="toolHistory = !toolHistory">{{ toolHistory ? '收起记录' : `全部记录 · ${toolTasks.length}` }}</button></header><article v-for="task in shownTools" :key="task.id"><span>{{ toolNames[task.input.operation] }} · {{ { queued: '等待处理', running: '处理中', succeeded: '已完成', failed: '处理失败', cancelled: '已停止' }[task.status] }}{{ ['queued', 'running'].includes(task.status) ? ` ${task.progress}%` : '' }}</span><p v-if="task.error" role="alert">{{ task.error }}</p><button v-if="['queued', 'running'].includes(task.status)" type="button" @click="changeTool(task, 'cancel')">停止</button><button v-if="['failed', 'cancelled'].includes(task.status)" type="button" @click="changeTool(task, 'retry')">重试</button><button v-if="task.status === 'succeeded'" type="button" @click="select(task.outputResultIds[0]); toolHistory = false">查看结果</button></article></div>
     <div v-if="!cropping && !maskMode && !toolSettings && !toolSubmitting" class="canvas-toolbar" role="toolbar" aria-label="画板工具">
@@ -567,6 +576,7 @@ onUnmounted(() => { saveScene().catch(() => {}); ++version; if (sceneTimer) clea
 .canvas-results { display: flex; flex: 1; min-width: 0; gap: 8px; overflow-x: auto; button { flex-shrink: 0; padding: 2px; border: 1px solid transparent; } button.selected { border-color: #b9abe6; background: var(--accent-soft); } img { display: block; width: 38px; height: 38px; object-fit: cover; border-radius: 3px; } }
 .canvas-zoom { display: flex; align-items: center; gap: 2px; flex-shrink: 0; label { display: flex; align-items: center; font-size: 12px; line-height: 16px; font-variant-numeric: tabular-nums; color: var(--text-secondary); } input { width: 38px; border: 0; background: transparent; color: inherit; text-align: right; font: inherit; appearance: textfield; } input::-webkit-inner-spin-button { appearance: none; } }
 .canvas-progress { position: absolute; top: 84px; left: calc(var(--conversation-width) + 30px); display: flex; flex-wrap: wrap; gap: 12px; padding: 8px 16px; background: var(--surface); border-radius: 10px; font-size: 11px; color: var(--muted); a { text-decoration: underline; margin-left: 4px; } }
+.canvas-copy { position: absolute; z-index: 3; top: 82px; right: 16px; width: 280px; max-width: calc(100% - var(--conversation-width) - 60px); max-height: calc(100% - 240px); overflow-y: auto; border-radius: 10px; background: var(--surface); box-shadow: var(--shadow); &.with-panel { right: 254px; } }
 .canvas-notice { position: absolute; z-index: 6; top: 84px; right: 16px; max-width: calc(100% - var(--conversation-width) - 40px); background: var(--surface); padding: 10px 16px; border: 1px solid var(--border); border-radius: 10px; font-size: 12px; color: var(--error); }
 .selected-actions { position: absolute; bottom: calc(100% + 10px); left: 50%; transform: translateX(-50%); z-index: 4; display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 4px; width: max-content; max-width: min(580px, 58vw); padding: 5px 8px; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; box-shadow: var(--shadow); white-space: nowrap; button { gap: 5px; color: var(--text-secondary); font-size: 12px; line-height: 17.6px; } }
 .canvas-toolbar, .selected-actions { :deep(svg) { stroke-width: 1.7; } }

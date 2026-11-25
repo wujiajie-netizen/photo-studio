@@ -118,8 +118,8 @@ LangGraph 保存业务状态并控制节点转换；Codex CLI 负责需求理解
 ```text
 需求理解
 → 参数检查
-→ 计划生成
-→ 用户确认
+→ 缺失信息集中追问或采用默认值
+→ 计划与参数生成
 → 工具执行
 → 质量检查
 → 重试或完成
@@ -140,7 +140,9 @@ LangGraph 保存业务状态并控制节点转换；Codex CLI 负责需求理解
 - 任务状态先落库再推送前端，保证刷新后可恢复。
 - 本地任务执行器控制并发、取消和失败重试，不依赖 Redis。
 
-`ProductImageParameters.sourceAssetId`、`CommerceParameters.sourceAssetId` 与执行提交 `projectId` 允许为 `null`；已保存 `AgentExecution.projectId` 仍为真实项目编号。`POST /api/agent/tasks/:id/parameters` 接收 `{ sourceAssetId: string | null }`，经统一提供者返回 `{ steps: AgentStepInput[] }`，服务校验工具、标题、顺序、素材与数量后保存到运行目录。草案按计划及素材复用；切换页面可取消请求，生成需单独确认。原规划 `AgentResult` 保持现有结构，旧会话无需改写。
+`ProductImageParameters.sourceAssetId`、`CommerceParameters.sourceAssetId` 与执行提交 `projectId` 允许为 `null`；已保存 `AgentExecution.projectId` 仍为真实项目编号。`POST /api/agent/tasks/:id/parameters` 接收 `{ sourceAssetId: string | null }`，经统一提供者返回 `{ steps: AgentStepInput[] }`，服务校验工具、标题、顺序、素材与数量后保存到运行目录。草案按计划及素材复用；自动创作在计划无需追问时由服务端整理参数并提交执行。原规划 `AgentResult` 保持现有结构，旧会话无需改写。
+
+自动创作状态按规划任务持久化，通过条件更新防止重复准备和提交，刷新页面只恢复状态；取消停止相应阶段，服务重启后中断任务标记失败，不自动重跑。执行成功后发布文案单独调用统一模型提供者并按执行记录保存，失败可独立重试，不影响图片，也不作为下轮用户事实。文案可以创作场景和情绪，但不捏造品牌或具体参数；无原图时不宣称示意图为真实商品外观。自动流程和真实出图仍需端到端验收。
 
 `GET /api/agent/tasks/:id/parameters` 只读取本轮最近保存的 `{ steps }` 草案，恢复素材选择；尚未整理的方案返回 404。`POST` 可按素材复用缓存，并更新最近草案，不因刷新重新推断素材。执行记录优先从持久化步骤恢复。
 

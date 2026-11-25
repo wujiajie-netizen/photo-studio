@@ -329,6 +329,16 @@ export interface AgentTask {
   error: string | null;
 }
 
+export interface AgentAutoFlow {
+  taskId: string;
+  sessionId: string;
+  sourceAssetId: string | null;
+  projectId: string | null;
+  status: 'planning' | 'clarifying' | 'preparing' | 'executing' | 'succeeded' | 'failed' | 'cancelled';
+  error: string | null;
+  executionId: string | null;
+}
+
 export interface AgentResult {
   summary: string;
   questions: string[];

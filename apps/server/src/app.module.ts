@@ -24,10 +24,14 @@ import { PresetsController } from './presets.controller';
 import { PresetsService } from './presets.service';
 import { CodexCallQueue, QueuedModelProvider } from './codex-call-queue';
 import { CodexModelService } from './codex-model.service';
+import { AgentAutoFlowService } from './agent-auto-flow.service';
+import { AgentAutoFlowController } from './agent-auto-flow.controller';
+import { AgentCopyService } from './agent-copy.service';
+import { AgentCopyController } from './agent-copy.controller';
 
 @Module({
-  controllers: [AppController, ProjectsController, CodexController, AgentController, ProductImageController, CommerceController, EditorController, ImageEngineController, AgentExecutionController, ImageToolController, PresetsController],
-  providers: [StorageService, ProjectsService, AgentService, ProductImageService, CommerceService, EditorService, ImageEngineService, AgentExecutionService, ImageToolService, PresetsService, { provide: CodexModelService, useFactory: () => new CodexModelService() }, { provide: PRODUCT_IMAGE_TOOL, inject: [ImageEngineService], useFactory: (engine: ImageEngineService) => engine.render.bind(engine) }, {
+  controllers: [AppController, ProjectsController, CodexController, AgentController, ProductImageController, CommerceController, EditorController, ImageEngineController, AgentExecutionController, AgentAutoFlowController, AgentCopyController, ImageToolController, PresetsController],
+  providers: [StorageService, ProjectsService, AgentService, ProductImageService, CommerceService, EditorService, ImageEngineService, AgentExecutionService, AgentAutoFlowService, AgentCopyService, ImageToolService, PresetsService, { provide: CodexModelService, useFactory: () => new CodexModelService() }, { provide: PRODUCT_IMAGE_TOOL, inject: [ImageEngineService], useFactory: (engine: ImageEngineService) => engine.render.bind(engine) }, {
     provide: AGENT_MODEL_PROVIDER,
     inject: [StorageService, CodexModelService],
     useFactory: (storage: StorageService, models: CodexModelService) => new CodexCliProvider(resolve(storage.dataDirectory, 'runs'), () => models.selected())

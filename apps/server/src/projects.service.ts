@@ -84,6 +84,8 @@ export class ProjectsService {
     tools.filter(row => sessions.has(row.session_id)).forEach(row => taskIds.add(row.id as string));
     if (results.some(row => taskIds.has(row.task_id as string) && row.project_id !== null && row.project_id !== id)) throw new ConflictException('关联对话的图片已保存到其他项目，请先处理这些图片后再删除。');
     const resultIds = new Set(results.filter(row => row.project_id === id || taskIds.has(row.task_id as string)).map(row => row.id as string));
+    if (database.prepare("SELECT f.project_id, t.session_id FROM agent_auto_flows f JOIN agent_tasks t ON t.id = f.plan_task_id WHERE f.status IN ('planning', 'preparing', 'executing')").all().some(flow => flow.project_id === id || sessions.has(flow.session_id))) throw new ConflictException('关联对话仍有进行中的任务，请等待完成或停止后再删除。');
+    if (database.prepare("SELECT e.project_id, e.session_id FROM agent_publication_copy c JOIN agent_executions e ON e.id = c.execution_id WHERE c.status IN ('queued', 'running')").all().some(copy => copy.project_id === id || sessions.has(copy.session_id))) throw new ConflictException('关联对话仍在生成文案，请等待完成后再删除。');
     for (const table of ['agent_tasks', 'agent_executions', 'image_tool_tasks']) {
       if (database.prepare(`SELECT session_id FROM ${table} WHERE status IN ('queued', 'running')`).all().some(row => sessions.has(row.session_id))) throw new ConflictException('关联对话仍有进行中的任务，请等待完成或停止后再删除。');
     }

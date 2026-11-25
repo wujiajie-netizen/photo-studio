@@ -23,13 +23,15 @@ const canvasState = ref<{ executions: AgentExecution[]; results: ProductImageRes
 const nextSource = ref<string | null | undefined>(undefined); const sourceName = ref(''); const composer = ref<HTMLTextAreaElement | null>(null);
 const assetsOpen = ref(false); const assets = ref<ProductAsset[]>([]); const uploading = ref(false); const assetError = ref('');
 const labels = { queued: '正在排队', running: '正在整理创作方案', succeeded: '方案已就绪', failed: '这次请求未完成', cancelled: '已停止' };
+const flowLabels = { planning: '正在理解需求', clarifying: '等待补充需求', preparing: '正在整理创作方向', executing: '正在生成', succeeded: '已完成', failed: '本次创作未完成', cancelled: '已停止' };
 const tools = { 'product-image': '商品图', 'product-kit': '商品套图', 'detail-page': '详情页' };
 /* 每个任务与用户消息在同一次提交中使用同一时间；方案直接放回本轮回复，避免消息和计划分成两份列表。 */
 const turns = computed(() => agent.tasks.map(task => {
   const executions = canvasState.value.executions.filter(execution => execution.planTaskId === task.id);
-  return { task, message: agent.messages.find(message => message.role === 'user' && message.createdAt === task.createdAt), result: agent.results[task.id], execution: executions[0], images: canvasState.value.results.filter(result => executions.some(execution => execution.steps.some(step => step.taskId === result.taskId))) };
+  const flow = agent.flows.find(item => item.taskId === task.id);
+  return { task, flow, message: agent.messages.find(message => message.role === 'user' && message.createdAt === task.createdAt), result: agent.results[task.id], execution: flow ? executions.find(execution => execution.id === flow.executionId) : executions[0], images: canvasState.value.results.filter(result => executions.some(execution => execution.steps.some(step => step.taskId === result.taskId))) };
 }));
-const initialSource = computed(() => nextSource.value !== undefined ? nextSource.value : canvasState.value.executions[0]?.steps[0]?.parameters.sourceAssetId ?? null);
+const initialSource = computed(() => nextSource.value !== undefined ? nextSource.value : agent.flows.length ? agent.flows.at(-1)!.sourceAssetId : canvasState.value.executions[0]?.steps[0]?.parameters.sourceAssetId ?? null);
 function reference(asset: ProductAsset, modifying = false) { nextSource.value = asset.id; sourceName.value = asset.name; assetsOpen.value = false; if (modifying && !prompt.value.trim()) prompt.value = '请基于这张图片修改：'; nextTick(() => composer.value?.focus()); }
 function showAssets() {
   assetsOpen.value = !assetsOpen.value; if (!assetsOpen.value) return;
@@ -56,7 +58,7 @@ function showResult(resultId: string) { canvas.value?.select(resultId)?.then(() 
 function submit() {
   if (agent.busy || agent.loading || uploading.value || !prompt.value.trim()) return;
   atBottom.value = true;
-  agent.submit(prompt.value, id.value).then(task => {
+  agent.submit(prompt.value, id.value, initialSource.value, projectId.value).then(task => {
     prompt.value = '';
     if (id.value === task.sessionId) return agent.load(task.sessionId).then(() => {});
     return router.replace({ path: '/', query: { session: task.sessionId } }).then(() => {});
@@ -64,7 +66,13 @@ function submit() {
 }
 function enter(event: KeyboardEvent) { if (event.isComposing || event.shiftKey) return; event.preventDefault(); submit(); }
 function retry() { const message = agent.messages.filter(item => item.role === 'user').at(-1); if (message) { prompt.value = message.content; submit(); } }
+function stopCurrent() { const task = latest.value; if (task) return agent.flows.some(flow => flow.taskId === task.id) ? agent.flowAction(task.id, 'cancel') : agent.cancel(task.id); }
 watch(id, (value, previous) => { atBottom.value = true; historyOpen.value = false; assetsOpen.value = false; if (previous) { nextSource.value = undefined; sourceName.value = ''; } canvasState.value = { executions: [], results: [], selectedId: '', loading: true }; agent.load(value); }, { immediate: true });
+/* 会话事件先于画板恢复时保留执行快照，画板就绪后再接入，避免刷新或切换时漏掉新作品。 */
+watch(() => [agent.flowExecutions, canvasState.value.loading, canvasState.value.executions.map(execution => execution.id)] as const, () => {
+  if (canvasState.value.loading || !canvas.value) return;
+  for (const execution of agent.flowExecutions) if (!canvasState.value.executions.some(item => item.id === execution.id)) canvas.value.addExecution(execution);
+}, { deep: true });
 watch(() => [agent.loading, turns.value.length, latest.value?.status, latest.value && agent.results[latest.value.id], canvasState.value.results.length], () => { if (atBottom.value) scrollBottom(); }, { deep: true });
 onUnmounted(agent.disconnect);
 </script>
@@ -77,6 +85,7 @@ onUnmounted(agent.disconnect);
       <div v-if="agent.loading" class="agent-notice" role="status">正在恢复对话…</div>
       <div v-if="agent.error" class="agent-notice error" role="alert">{{ agent.error }} <button v-if="id" type="button" @click="agent.load(id)">重新读取</button></div>
       <p v-if="agent.connection" class="agent-notice" role="status">{{ agent.connection }}</p>
+      <p v-if="agent.flowConnection" class="agent-notice" role="status">{{ agent.flowConnection }}</p>
       <div v-if="id" ref="transcript" class="conversation" aria-label="会话记录" aria-live="polite" @scroll="scrolled">
         <section v-for="turn in turns" :key="turn.task.id" class="conversation-turn">
           <article class="user"><p>{{ turn.message?.content }}</p></article>
@@ -85,14 +94,18 @@ onUnmounted(agent.disconnect);
             <template v-if="turn.result">
               <p>{{ turn.result.summary }}</p>
               <div v-if="turn.result.questions.length" class="clarification"><p v-for="question in turn.result.questions" :key="question">{{ question }}</p><span>直接在下方回复，也可以说“你决定”。</span></div>
-              <div v-else class="creation-plan">
+              <div v-else-if="!turn.flow" class="creation-plan">
                 <header><h2>创作方案</h2><span>{{ turn.result.plan.filter(step => step.tool).length }} 个制作步骤</span></header>
                 <ol><li v-for="(step, index) in turn.result.plan" :key="index"><span class="step-number">{{ index + 1 }}</span><div><strong>{{ step.title }}</strong><p>{{ step.description }}</p></div><span v-if="step.tool" class="tool-label">{{ tools[step.tool] }}</span></li></ol>
                 <AgentCreation v-if="turn.result.plan.some(step => step.tool)" :task-id="turn.task.id" :execution="turn.execution" :active="latest?.id === turn.task.id" :loading="canvasState.loading" :initial-source="initialSource" :initial-project="projectId" @started="canvas?.addExecution($event)" @ready="atBottom && scrollBottom()" />
               </div>
+              <template v-if="turn.flow && !turn.result.questions.length">
+                <AgentCreation v-if="turn.execution" :task-id="turn.task.id" :execution="turn.execution" :active="latest?.id === turn.task.id" :loading="canvasState.loading" :initial-source="initialSource" :initial-project="projectId" @started="canvas?.addExecution($event)" />
+                <div v-else class="flow-status" role="status"><span>{{ flowLabels[turn.flow.status] }}</span><p v-if="turn.flow.error" class="error">{{ turn.flow.error }}</p><button v-if="['planning', 'preparing'].includes(turn.flow.status)" type="button" @click="agent.flowAction(turn.task.id, 'cancel')">停止</button><button v-if="['failed', 'cancelled'].includes(turn.flow.status) && !turn.flow.executionId" type="button" @click="agent.flowAction(turn.task.id, 'retry')">重试</button></div>
+              </template>
               <div v-if="turn.images.length" class="conversation-results"><button v-for="image in turn.images" :key="image.id" :data-result-id="image.id" type="button" :class="{ selected: canvasState.selectedId === image.id }" :aria-pressed="canvasState.selectedId === image.id" :aria-label="`在画板查看 ${image.name}`" @click="showResult(image.id)"><img :src="`/api/editor/results/${image.id}/file`" :alt="image.name" /></button><span>点击作品定位到画布</span></div>
             </template>
-            <div v-else class="task-status" role="status"><span v-if="['queued', 'running'].includes(turn.task.status)" class="working-dot" />{{ labels[turn.task.status] }}<button v-if="['queued', 'running'].includes(turn.task.status)" type="button" @click="agent.cancel(turn.task.id)">停止</button></div>
+            <div v-else class="task-status" role="status"><span v-if="['queued', 'running'].includes(turn.task.status)" class="working-dot" />{{ turn.flow ? flowLabels[turn.flow.status] : labels[turn.task.status] }}<button v-if="['queued', 'running'].includes(turn.task.status)" type="button" @click="turn.flow ? agent.flowAction(turn.task.id, 'cancel') : agent.cancel(turn.task.id)">停止</button></div>
             <p v-if="turn.task.error" class="error" role="alert">{{ turn.task.error }}</p>
             <button v-if="latest?.id === turn.task.id && ['failed', 'cancelled'].includes(turn.task.status)" type="button" class="button secondary" :disabled="agent.busy || agent.loading" @click="retry">重新尝试</button>
           </article>
@@ -103,9 +116,9 @@ onUnmounted(agent.disconnect);
         <div v-if="assetsOpen" class="composer-assets" aria-label="选择已有素材"><header><strong>素材库</strong><button type="button" aria-label="关闭素材库" @click="assetsOpen = false"><X :size="14" /></button></header><div><button v-for="asset in assets" :key="asset.id" type="button" :aria-label="`引用素材 ${asset.name}`" @click="reference(asset)"><img :src="`/api/assets/${asset.id}/file`" :alt="asset.name" /><span>{{ asset.name }}</span></button><p v-if="!assets.length">还没有素材，可点击下方加号上传。</p></div></div>
         <div v-if="initialSource" class="composer-source"><img :src="`/api/assets/${initialSource}/file`" :alt="sourceName || '上一轮素材'" /><span>{{ sourceName ? '下轮基于这张图创作' : '沿用上一轮素材，可移除后文字创作' }}</span><button type="button" aria-label="移除下轮素材" @click="nextSource = null; sourceName = ''"><X :size="13" /></button></div>
         <label class="sr-only" for="agent-prompt">描述你的电商视觉任务</label>
-        <textarea id="agent-prompt" ref="composer" v-model="prompt" maxlength="2000" rows="3" :disabled="agent.submitting" :placeholder="initialSource ? '说说要改什么、保留什么，再确认生成方案…' : id ? '继续说说你的想法，例如：改成暖色，其他你决定…' : '描述想制作的商品图，例如：做一张高级感咖啡宣传图，其他你决定…'" @keydown.enter="enter" />
+        <textarea id="agent-prompt" ref="composer" v-model="prompt" maxlength="2000" rows="3" :disabled="agent.submitting" :placeholder="initialSource ? '说说要改什么、保留什么…' : id ? '继续说说你的想法，例如：改成暖色，其他你决定…' : '描述想制作的商品图，例如：做一张高级感咖啡宣传图，其他你决定…'" @keydown.enter="enter" />
         <p v-if="assetError" class="asset-error" role="alert">{{ assetError }}</p>
-        <footer><span><label class="composer-upload" :title="uploading ? '上传中…' : '上传图片' "><input type="file" aria-label="上传创作素材" accept="image/jpeg,image/png,image/webp" :disabled="uploading || agent.submitting" @change="upload" /><ImagePlus :size="17" /></label><button type="button" aria-label="选择已有素材" title="素材库" :aria-expanded="assetsOpen" @click="showAssets"><FolderOpen :size="17" /></button><Sparkles :size="14" /> {{ uploading ? '上传中…' : 'Agent' }}<small>Enter 发送 · Shift + Enter 换行</small></span><button v-if="agent.busy && latest" type="button" class="button" aria-label="停止当前请求" @click="agent.cancel(latest.id)"><Square :size="13" /> 停止</button><button v-else type="submit" class="button" :disabled="agent.loading || uploading || !prompt.trim()" aria-label="发送需求"><ArrowUp :size="18" /></button></footer>
+        <footer><span><label class="composer-upload" :title="uploading ? '上传中…' : '上传图片' "><input type="file" aria-label="上传创作素材" accept="image/jpeg,image/png,image/webp" :disabled="uploading || agent.submitting" @change="upload" /><ImagePlus :size="17" /></label><button type="button" aria-label="选择已有素材" title="素材库" :aria-expanded="assetsOpen" @click="showAssets"><FolderOpen :size="17" /></button><Sparkles :size="14" /> {{ uploading ? '上传中…' : 'Agent' }}<small>Enter 发送 · Shift + Enter 换行</small></span><button v-if="agent.busy && latest" type="button" class="button" aria-label="停止当前请求" @click="stopCurrent"><Square :size="13" /> 停止</button><button v-else type="submit" class="button" :disabled="agent.loading || uploading || !prompt.trim()" aria-label="发送需求"><ArrowUp :size="18" /></button></footer>
       </form>
     </div>
     <AgentCanvas v-if="id && agent.session?.id === id" :key="`${id}:${projectId}`" ref="canvas" :session-id="id" :project-id="projectId" :result-id="resultId" :task-ids="completedTaskIds" @update="canvasState = $event" @reference="reference" @reveal="arrive" />
@@ -121,6 +134,7 @@ onUnmounted(agent.disconnect);
 .composer-upload { display: grid; place-items: center; position: relative; padding: 4px; cursor: pointer; input { position: absolute; inset: 0; width: 100%; opacity: 0; cursor: pointer; } }
 .composer-assets { position: absolute; bottom: calc(100% + 8px); left: 0; right: 0; padding: 12px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); box-shadow: var(--shadow); z-index: 3; header { display: flex; align-items: center; justify-content: space-between; font-size: 12px; } button { border: 0; background: transparent; color: var(--text-secondary); padding: 4px; } > div { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 8px; max-height: 220px; overflow-y: auto; } img { width: 100%; height: 62px; object-fit: contain; background: var(--page); border-radius: 5px; } span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; } p { grid-column: 1 / -1; font-size: 12px; color: var(--muted); } }
 .asset-error { padding: 6px 12px; color: var(--error); font-size: 11px; }
+.flow-status { margin-top: 12px; color: var(--muted); font-size: 12px; button { margin-left: 10px; border: 0; background: transparent; color: var(--accent); cursor: pointer; } p { margin-top: 6px; } }
 .conversation-results { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 14px; button { padding: 3px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); } button.selected { border-color: #b9abe6; box-shadow: 0 0 0 2px var(--accent-soft); } img { width: 82px; height: 82px; object-fit: cover; display: block; border-radius: 5px; } span { width: 100%; font-size: 12px; color: var(--muted); } }
 .active .conversation-heading .history-toggle { display: inline-flex; }
 .active .conversation-heading { gap: 8px; padding-bottom: 14px; }

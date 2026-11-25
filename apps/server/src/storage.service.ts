@@ -138,6 +138,18 @@ export class StorageService implements OnModuleDestroy {
         error TEXT
       ) STRICT;
       CREATE INDEX IF NOT EXISTS agent_executions_plan ON agent_executions(plan_task_id, created_at);
+      CREATE TABLE IF NOT EXISTS agent_publication_copy (
+        execution_id TEXT PRIMARY KEY NOT NULL REFERENCES agent_executions(id) ON DELETE CASCADE,
+        status TEXT NOT NULL, content TEXT NOT NULL, error TEXT
+      ) STRICT;
+      CREATE TABLE IF NOT EXISTS agent_auto_flows (
+        plan_task_id TEXT PRIMARY KEY NOT NULL REFERENCES agent_tasks(id) ON DELETE CASCADE,
+        source_asset_id TEXT REFERENCES product_assets(id) ON DELETE SET NULL,
+        project_id TEXT REFERENCES projects(id) ON DELETE SET NULL,
+        status TEXT NOT NULL CHECK(status IN ('planning', 'clarifying', 'preparing', 'executing', 'succeeded', 'failed', 'cancelled')),
+        error TEXT,
+        execution_id TEXT REFERENCES agent_executions(id) ON DELETE SET NULL
+      ) STRICT;
       CREATE TABLE IF NOT EXISTS image_tool_tasks (
         id TEXT PRIMARY KEY NOT NULL,
         session_id TEXT NOT NULL REFERENCES agent_sessions(id),

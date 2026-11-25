@@ -54,6 +54,8 @@ export class AgentService implements OnApplicationShutdown {
       ids.forEach(id => {
         this.session(id);
         if (body.action === 'delete' && ['agent_tasks', 'agent_executions', 'image_tool_tasks'].some(table => database.prepare(`SELECT id FROM ${table} WHERE session_id = ? AND status IN ('queued', 'running') LIMIT 1`).get(id))) throw new ConflictException('选中的对话还有任务进行中，请等待完成或停止任务后再删除。');
+        if (body.action === 'delete' && database.prepare("SELECT f.plan_task_id FROM agent_auto_flows f JOIN agent_tasks t ON t.id = f.plan_task_id WHERE t.session_id = ? AND f.status IN ('planning', 'preparing', 'executing') LIMIT 1").get(id)) throw new ConflictException('选中的对话还有任务进行中，请等待完成或停止任务后再删除。');
+        if (body.action === 'delete' && database.prepare("SELECT c.execution_id FROM agent_publication_copy c JOIN agent_executions e ON e.id = c.execution_id WHERE e.session_id = ? AND c.status IN ('queued', 'running') LIMIT 1").get(id)) throw new ConflictException('选中的对话还有文案生成中，请等待完成后再删除。');
       });
       const statement = database.prepare(body.action === 'delete' ? 'UPDATE agent_sessions SET deleted_at = ? WHERE id = ?' : body.action === 'pin' ? 'UPDATE agent_sessions SET pinned_at = COALESCE(pinned_at, ?) WHERE id = ?' : 'UPDATE agent_sessions SET pinned_at = ? WHERE id = ?');
       ids.forEach(id => statement.run(body.action === 'unpin' ? null : now, id));
@@ -85,10 +87,16 @@ export class AgentService implements OnApplicationShutdown {
     catch { throw new NotFoundException('计划文件无法读取，请重新提交需求。'); }
   }
 
-  submit(content: unknown, sessionId?: string): AgentTask {
+  submit(content: unknown, sessionId?: string, auto?: { sourceAssetId: unknown; projectId: unknown }): AgentTask {
     if (typeof content !== 'string' || !content.trim() || [...content.trim()].length > 2000) throw new BadRequestException('请输入 1 到 2000 个字符的需求。');
     if (this.stopped) throw new ConflictException('本地服务正在停止，请稍后重试。');
     if (this.queue.length >= 10) throw new ConflictException('等待中的计划已达上限，请稍后再提交。');
+    if (auto) {
+      const validId = (id: unknown): id is string | null => id === null || typeof id === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id);
+      if (!validId(auto.sourceAssetId) || !validId(auto.projectId)) throw new BadRequestException('素材或项目编号无效。');
+      if (auto.sourceAssetId !== null && !this.storage.database.prepare('SELECT id FROM product_assets WHERE id = ?').get(auto.sourceAssetId)) throw new BadRequestException('商品素材不存在。');
+      if (auto.projectId !== null && !this.storage.database.prepare('SELECT id FROM projects WHERE id = ?').get(auto.projectId)) throw new BadRequestException('项目不存在。');
+    }
     if (sessionId) {
       this.session(sessionId);
       if (this.tasks(sessionId).some((task) => ['queued', 'running'].includes(task.status))) throw new ConflictException('当前会话的任务尚未结束，请等待或取消后再提交。');
@@ -104,6 +112,7 @@ export class AgentService implements OnApplicationShutdown {
       else database.prepare('UPDATE agent_sessions SET updated_at = ? WHERE id = ?').run(now, id);
       database.prepare('INSERT INTO agent_messages VALUES (?, ?, ?, ?, ?)').run(randomUUID(), id, 'user', content.trim(), now);
       database.prepare('INSERT INTO agent_tasks VALUES (?, ?, ?, ?, ?, ?)').run(task.id, id, task.status, now, now, null);
+      if (auto) database.prepare("INSERT INTO agent_auto_flows (plan_task_id, source_asset_id, project_id, status, error, execution_id) VALUES (?, ?, ?, 'planning', NULL, NULL)").run(task.id, auto.sourceAssetId as string | null, auto.projectId as string | null);
       database.exec('COMMIT');
     } catch (error) { database.exec('ROLLBACK'); throw error; }
     this.queue.push({ task, prompt: content.trim() });
@@ -145,7 +154,11 @@ export class AgentService implements OnApplicationShutdown {
     const providerSessionId = row.provider_session_id as string | null;
     /* 每次只执行一个模型任务；取消后丢弃迟到结果，失败保留会话与消息，下一条消息可继续恢复。 */
     const context = JSON.stringify(this.messages(entry.task.sessionId).map(message => ({ role: message.role, content: message.content })));
-    this.work = planWithAgent(this.provider, entry.task.id, `完整会话记录：${context}\n本轮用户需求：${entry.prompt}`, providerSessionId, signal.signal, (event) => {
+    const questions = this.tasks(entry.task.sessionId).filter(task => task.status === 'succeeded').flatMap(task => {
+      try { return this.result(task.id).questions; } catch (error) { if (error instanceof NotFoundException) return []; throw error; }
+    });
+    const source = this.storage.database.prepare('SELECT source_asset_id FROM agent_auto_flows WHERE plan_task_id = ?').get(entry.task.id);
+    this.work = planWithAgent(this.provider, entry.task.id, `完整会话记录：${context}\n此前助手的澄清问题（不是用户提供的事实）：${JSON.stringify(questions)}\n${source ? source.source_asset_id ? '本轮已绑定商品素材，不要追问是否上传素材。\n' : '本轮没有绑定商品素材。\n' : ''}本轮用户需求：${entry.prompt}`, providerSessionId, signal.signal, (event) => {
       if (event.type === 'started' && !signal.signal.aborted) this.storage.database.prepare('UPDATE agent_sessions SET provider_session_id = ? WHERE id = ?').run(event.sessionId, entry.task.sessionId);
     }).then((result) => {
       if (signal.signal.aborted || this.stopped) return;

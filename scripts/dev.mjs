@@ -26,15 +26,17 @@ function stop(code) {
   process.exitCode = code;
 }
 
-function launch(args, pipeOutput = false) {
+function launch(name, args, pipeOutput = false) {
   const child = spawn(process.execPath, args, { cwd: root, stdio: ['inherit', pipeOutput ? 'pipe' : 'inherit', 'inherit'], windowsHide: true });
   children.push(child);
   child.on('error', (error) => {
-    console.error('启动失败：', error.message);
+    console.error(`${name}启动失败：`, error.message);
     stop(1);
   });
-  child.on('exit', (code) => {
-    if (!stopping) stop(code || 1);
+  child.on('exit', (code, signal) => {
+    if (stopping) return;
+    console.error(`${name}意外退出（${signal ? `信号 ${signal}` : `退出码 ${code}`}）。`);
+    stop(code || 1);
   });
   return child;
 }
@@ -87,7 +89,7 @@ Promise.resolve()
     process.once('SIGTERM', () => stop(0));
     /* 首次编译完成后再启动服务，健康检查通过后开放前端，避免首页误报连接失败。 */
     return new Promise((resolveCompile, reject) => {
-      const watcher = launch([compiler, '--watch', '--pretty', 'false', '--preserveWatchOutput', '-p', 'apps/server/tsconfig.json'], true);
+      const watcher = launch('TypeScript 编译器', [compiler, '--watch', '--pretty', 'false', '--preserveWatchOutput', '-p', 'apps/server/tsconfig.json'], true);
       let initialOutput = '';
       let initialized = false;
       watcher.stdout.on('data', (chunk) => {
@@ -103,13 +105,13 @@ Promise.resolve()
   })
   .then(() => {
     if (stopping) throw new Error('启动已取消。');
-    launch(['--watch', 'apps/server/dist/main.js']);
+    launch('Nest 后端', ['--watch', 'apps/server/dist/main.js']);
     return waitForService();
   })
   .then(() => {
     if (stopping) throw new Error('启动已取消。');
     const vite = resolve(dirname(require.resolve('vite/package.json')), 'bin/vite.js');
-    launch([vite, '--host', '127.0.0.1', '--config', 'apps/web/vite.config.ts', 'apps/web']);
+    launch('Vite 前端', [vite, '--host', '127.0.0.1', '--config', 'apps/web/vite.config.ts', 'apps/web']);
     console.log('\nPhoto Studio: http://127.0.0.1:5173\n按 Ctrl+C 停止，或运行 scripts/stop.ps1。\n');
   })
   .catch((error) => {
